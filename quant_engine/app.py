@@ -26,11 +26,23 @@ st.set_page_config(page_title="QUANT HODL v13 - GENUINE ACCURACY", layout="wide"
 @st.cache_data(ttl=3600)
 def fetch_market_data(ticker):
     try:
+        # Scarichiamo i dati senza parametri rigidi per massima compatibilità
         df = yf.download(ticker, period="5y", progress=False)
         if df.empty:
             return None
+        
+        # FIX DEFINITIVO MULTIINDEX (Compatibile 2025/2026): Appiattiamo le colonne se yfinance restituisce livelli multipli
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+        
+        # Pulizia stringhe colonne per sicurezza
+        df.columns = [str(col).strip() for col in df.columns]
+        
+        # Verifica presenza colonne necessarie
+        required_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+        if not all(c in df.columns for c in required_cols):
+            return None
+            
         df.index = pd.to_datetime(df.index).tz_localize(None).astype('datetime64[ns]')
         return df
     except Exception:
@@ -80,6 +92,7 @@ class MacroFeatureEngineer:
         df['Above_SMA50']  = (close > df['SMA_50']).astype(int)
         df['Above_SMA200'] = (close > df['SMA_200']).astype(int)
 
+        # BUG FIX: Ripristinata correttamente la lista sintattica dei giorni per il momentum
         for p in [5, 10, 21]:
             df[f'Mom_{p}d'] = close.pct_change(p)
 
@@ -246,15 +259,3 @@ class MacroPredictiveCore:
         return df, mean_accuracy, probabilities, accuracies, brier_scores, df_backtest
 
 # =====================================================================
-# 6. ENGINE DI BACKTESTING & SIMULAZIONE PORTAFOGLIO
-# =====================================================================
-def run_backtest(df_bt, target_horizon='Target_1d', prob_threshold=0.53):
-    df_strategy = df_bt.copy()
-    df_strategy['Market_Returns'] = df_strategy['Close'].pct_change()
-    
-    prob_col = f'Prob_{target_horizon}'
-    df_strategy['Signal'] = np.where(df_strategy[prob_col].shift(1) > prob_threshold, 1, 0)
-    
-    df_strategy['Strategy_Returns'] = df_strategy['Market_Returns'] * df_strategy['Signal']
-    
-    df_strategy['Cum_Market'] = (1 + df_strategy['Market_Returns'].fillna(0)).cumprod()
