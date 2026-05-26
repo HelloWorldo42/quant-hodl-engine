@@ -15,7 +15,7 @@ warnings.filterwarnings('ignore')
 # =====================================================================
 # 1. CONFIGURAZIONE INTERFACCIA
 # =====================================================================
-st.set_page_config(page_title="QUANT HODL v12.1 - PURIFIED ENGINE", layout="wide")
+st.set_page_config(page_title="QUANT HODL v12.3 - ESSENTIAL ENGINE", layout="wide")
 
 # =====================================================================
 # 2. SEZIONE API & DATA EXTRACTION (CON CACHING)
@@ -41,7 +41,7 @@ def fetch_usd_eur_rate():
             df.columns = df.columns.get_level_values(0)
         return float(df['Close'].iloc[-1])
     except Exception:
-        return 0.92  # Fallback approssimativo in caso di errore API
+        return 0.92
 
 @st.cache_data(ttl=3600)
 def fetch_historical_sentiment():
@@ -151,25 +151,28 @@ class MacroPredictiveCore:
         return df, np.mean(accuracies), prob_up, today_features
 
 # =====================================================================
-# 5. LOGICA OPERATIVA COMBINATA (ACCUMULO + ASSET REBALANCING)
+# 5. LOGICA SEMPLIFICATA (SOLO PAROLE ESSENZIALI)
 # =====================================================================
 def calculate_hodl_matrix(z_score, prob_up, base_quota):
+    # Condizioni basate sullo Z-Score (Distanza dalla media storica)
     if z_score > 2.3:
-        mult = 0.0; status = "🛑 STOP ACCUMULO (Rischio Bolla Estrema)"
-        sell_action = "🚨 VENDITA FRAZIONATA: Vendi il 20% della posizione per incassare profitto."
+        mult = 0.0
+        status = ":red[🛑 NON COMPRARE (Prezzo Troppo Alto)]"
+        sell_action = "🚨 **VENDI IL 20%** per incassare profitto."
     elif z_score > 1.2:
-        mult = 0.4; status = "⚠️ DISTRIBUZIONE (Rallenta gradualmente)"
-        sell_action = "💵 ALLEGGERIMENTO: Valuta di liquidare il 10% se hai sovraesposizione."
-    elif z_score < -1.6:
-        mult = 2.5; status = "🔥 SUPER SCONTO (Massimo Accumulo Storico)"
-        sell_action = "💎 STRONG HODL (Vietato vendere)"
+        mult = 0.4
+        status = ":orange[⚠️ COMPRA POCO (Prezzo Alto)]"
+        sell_action = "💵 **ALLEGGERISCI**: Valuta di ridurre se hai troppa esposizione."
     elif z_score < -0.7:
-        mult = 1.6; status = "📈 ACQUISTO CON VANTAGGIO (Prezzo Sotto Valore)"
-        sell_action = "💎 STRONG HODL (Vietato vendere)"
+        mult = 1.6
+        status = ":green[🔥 COMPRA COMPRA (Forte Sconto)]"
+        sell_action = "💎 **HODL** (Vietato vendere)"
     else:
-        mult = 1.0; status = "⚖️ BILANCIAMENTO STANDARD (Prezzo di Equilibrio)"
-        sell_action = "💎 HODL"
+        mult = 1.0
+        status = ":green[⚖️ COMPRA (Accumulo Standard)]"
+        sell_action = "💎 **HODL**"
         
+    # Correzione dinamica basata sull'Intelligenza Artificiale (Probabilità a 5 giorni)
     if prob_up > 0.60 and mult > 0:
         mult *= 1.25
     elif prob_up < 0.40 and mult > 0:
@@ -181,16 +184,14 @@ def calculate_hodl_matrix(z_score, prob_up, base_quota):
 # 6. DASHBOARD PRINCIPALE
 # =====================================================================
 def main():
-    st.title("🎯 QUANT HODL ENGINE v12.1")
-    st.subheader("Architettura Purificata con Doppia Valuta USD/EUR")
+    st.title("🎯 QUANT HODL ENGINE v12.3")
+    st.subheader("Interfaccia Semplificata e Segnali Diretti (Compra/Vendi)")
     st.divider()
     
     base_quota = st.sidebar.number_input("Quota PAC Base (€)", min_value=10, value=100, step=10)
-    
-    ticker_input = st.sidebar.text_input("Inserisci i Ticker separati da virgola", value="BTC-USD, ETH-USD, AAPL, NVDA")
+    ticker_input = st.sidebar.text_input("Inserisci i Ticker separati da virgola", value="BTC-USD, TSLA, AAPL")
     assets = [ticker.strip().upper() for ticker in ticker_input.split(",") if ticker.strip()]
     
-    # Recupera il tasso di cambio live USD -> EUR
     usd_eur_rate = fetch_usd_eur_rate()
     
     if not assets:
@@ -199,31 +200,35 @@ def main():
         
     for asset in assets:
         df, acc, prob_up, today_features = MacroPredictiveCore.compile_and_validate(asset)
+        
         if df is None or today_features is None or today_features.empty: 
+            st.sidebar.error(f"❌ Impossibile caricare '{asset}'.")
             continue
         
         z_now = today_features['Z_Score'].iloc[-1]
         price_now = today_features['Close'].iloc[-1]
+        
         target_quota, state, sell_instruction = calculate_hodl_matrix(z_now, prob_up, base_quota)
         
-        # Gestione intelligente della valuta visiva
         if "EUR" in asset:
             price_display = f"{price_now:,.2f} €"
         else:
             price_eur = price_now * usd_eur_rate
             price_display = f"${price_now:,.2f} ({price_eur:,.2f} €)"
         
-        with st.expander(f"🔮 MATRICE QUANTITATIVA: {asset}", expanded=True):
+        with st.expander(f"🔮 SEGNO CORRENTE: {asset}", expanded=True):
             col1, col2, col3 = st.columns(3)
             col1.metric("Prezzo Attuale", price_display)
-            col2.metric("Accuratezza Predittiva Reale (WF)", f"{acc * 100:.1f}%")
-            col3.metric("Confidenza Algoritmo (Prob Up)", f"{prob_up * 100:.1f}%")
+            col2.metric("Affidabilità Motore", f"{acc * 100:.1f}%")
+            col3.metric("Spinta IA (Breve Termine)", f"{prob_up * 100:.1f}%")
             
             c_box1, c_box2 = st.columns(2)
             with c_box1:
-                st.info(f"**Strategia d'Ingresso:**\n{state}\n\n**PAC Dinamico:** **{target_quota} €**")
+                st.markdown(f"### **Cosa fare oggi:**\n## {state}")
+                st.markdown(f"### 💵 **Quota da investire nel PAC:** **{target_quota} €**")
             with c_box2:
-                st.warning(f"**Strategia d'Uscita (Rebalancing):**\n{sell_instruction}")
+                st.markdown("### **Se hai bisogno di ribilanciare:**")
+                st.info(f"{sell_instruction}")
 
 if __name__ == "__main__":
     main()
