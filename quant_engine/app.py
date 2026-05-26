@@ -34,6 +34,16 @@ def fetch_market_data(ticker):
         return None
 
 @st.cache_data(ttl=3600)
+def fetch_usd_eur_rate():
+    try:
+        df = yf.download("USDEUR=X", period="5d", progress=False)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        return float(df['Close'].iloc[-1])
+    except Exception:
+        return 0.92  # Fallback approssimativo in caso di errore API
+
+@st.cache_data(ttl=3600)
 def fetch_historical_sentiment():
     try:
         r = requests.get("https://api.alternative.me/fng/?limit=100", timeout=5)
@@ -172,14 +182,19 @@ def calculate_hodl_matrix(z_score, prob_up, base_quota):
 # =====================================================================
 def main():
     st.title("🎯 QUANT HODL ENGINE v12.1")
-    st.subheader("Architettura Purificata a prova di Data Leakage")
+    st.subheader("Architettura Purificata con Doppia Valuta USD/EUR")
     st.divider()
     
     base_quota = st.sidebar.number_input("Quota PAC Base (€)", min_value=10, value=100, step=10)
-    assets = st.sidebar.multiselect("Seleziona i tuoi Asset HODL", ['BTC-USD', 'ETH-USD', 'AAPL', 'NVDA'], default=['BTC-USD', 'AAPL'])
+    
+    ticker_input = st.sidebar.text_input("Inserisci i Ticker separati da virgola", value="BTC-USD, ETH-USD, AAPL, NVDA")
+    assets = [ticker.strip().upper() for ticker in ticker_input.split(",") if ticker.strip()]
+    
+    # Recupera il tasso di cambio live USD -> EUR
+    usd_eur_rate = fetch_usd_eur_rate()
     
     if not assets:
-        st.info("Seleziona gli asset nella barra laterale per attivare il monitoraggio quantitativo.")
+        st.info("Inserisci almeno un ticker valido nella barra laterale (es: BTC-USD, TSLA).")
         return
         
     for asset in assets:
@@ -191,9 +206,16 @@ def main():
         price_now = today_features['Close'].iloc[-1]
         target_quota, state, sell_instruction = calculate_hodl_matrix(z_now, prob_up, base_quota)
         
+        # Gestione intelligente della valuta visiva
+        if "EUR" in asset:
+            price_display = f"{price_now:,.2f} €"
+        else:
+            price_eur = price_now * usd_eur_rate
+            price_display = f"${price_now:,.2f} ({price_eur:,.2f} €)"
+        
         with st.expander(f"🔮 MATRICE QUANTITATIVA: {asset}", expanded=True):
             col1, col2, col3 = st.columns(3)
-            col1.metric("Prezzo Attuale", f"${price_now:,.2f}")
+            col1.metric("Prezzo Attuale", price_display)
             col2.metric("Accuratezza Predittiva Reale (WF)", f"{acc * 100:.1f}%")
             col3.metric("Confidenza Algoritmo (Prob Up)", f"{prob_up * 100:.1f}%")
             
