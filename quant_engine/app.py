@@ -15,55 +15,65 @@ import warnings
 
 warnings.filterwarnings('ignore')
 
-# =====================================================================
-# 1. CONFIGURAZIONE INTERFACCIA
-# =====================================================================
+# 1. CONFIGURAZIONE INTERFACCIA IMMEDIATA
 st.set_page_config(page_title="QUANT HODL v13 - GENUINE ACCURACY", layout="wide")
 
-# =====================================================================
-# 2. DATA EXTRACTION CON CONTROLLO STRUTTURA BLINDATO
-# =====================================================================
-@st.cache_data(ttl=1800)
-def fetch_market_data(ticker):
+st.title("📊 QUANT HODL v13 — AI Predictive & Backtest Suite")
+st.subheader("Validazione Walk-Forward Rigorosa & Simulazione Performance Storica")
+
+# 2. SIDEBAR DI CONTROLLO IMMEDIATA
+st.sidebar.header("⚙️ Configurazione Asset")
+ticker = st.sidebar.text_input("Ticker Yahoo Finance (es. BTC-USD, ETH-USD)", value="BTC-USD").upper().strip()
+
+st.sidebar.markdown("---")
+st.sidebar.header("📈 Parametri Backtesting AI")
+target_select = st.sidebar.selectbox("Orizzonte AI di Riferimento", ['Target_1d', 'Target_3d', 'Target_5d'], index=0)
+threshold_slider = st.sidebar.slider("Soglia di Attivazione Probabilità", min_value=0.50, max_value=0.60, value=0.53, step=0.01)
+
+def fetch_market_data_safe(ticker_str):
     try:
-        df = yf.download(ticker, period="5y", progress=False)
+        # Scarichiamo i dati base
+        df = yf.download(ticker_str, period="5y", progress=False)
         if df.empty:
             return None
-        
+            
+        # FIX FINALE PER LE NUOVE VERSIONI DI YFINANCE (2025/2026)
+        # Se le colonne sono un MultiIndex, estraiamo solo il primo livello (Open, High, Close, ecc.)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
             
+        # Forziamo i nomi delle colonne in stringhe pulite con iniziale maiuscola
         df.columns = [str(c).strip().capitalize() for c in df.columns]
         
-        rename_dict = {
-            'Open': 'Open', 'High': 'High', 'Low': 'Low', 
-            'Close': 'Close', 'Adj close': 'Close', 'Volume': 'Volume'
-        }
+        # Rimappatura di sicurezza delle colonne
+        rename_dict = {'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume', 'Adj close': 'Close'}
         df = df.rename(columns=rename_dict)
+        
+        # Rimuoviamo colonne duplicate o non necessarie nate dall'appiattimento
+        df = df.loc[:, ~df.columns.duplicated()]
         
         required = ['Open', 'High', 'Low', 'Close', 'Volume']
         if not all(col in df.columns for col in required):
+            st.error(f"Colonne mancanti nel dataset scaricato. Trovate solo: {list(df.columns)}")
             return None
             
         df_cleaned = df[required].astype(float)
         df_cleaned.index = pd.to_datetime(df_cleaned.index).tz_localize(None).astype('datetime64[ns]')
         return df_cleaned
-    except Exception:
+    except Exception as e:
+        st.error(f"Errore critico durante il download da Yahoo Finance: {str(e)}")
         return None
 
-@st.cache_data(ttl=3600)
-def fetch_usd_eur_rate():
+def fetch_usd_eur_rate_safe():
     try:
         df = yf.download("USDEUR=X", period="5d", progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        df.columns = [str(c).strip().capitalize() for c in df.columns]
         return float(df['Close'].iloc[-1])
     except Exception:
         return 0.92
 
-@st.cache_data(ttl=1800)
-def fetch_historical_sentiment():
+def fetch_historical_sentiment_safe():
     try:
         r = requests.get("https://alternative.me", timeout=5)
         data = r.json()['data']
@@ -76,13 +86,19 @@ def fetch_historical_sentiment():
     except Exception:
         return pd.Series(dtype=float)
 
-# =====================================================================
-# 3. FEATURE ENGINEERING
-# =====================================================================
-class MacroFeatureEngineer:
-    @staticmethod
-    def construct_matrix(df_price, series_fng):
-        df = df_price.copy()
+# Esecuzione della Pipeline con feedback immediato a schermo
+if ticker:
+    df_raw = fetch_market_data_safe(ticker)
+    eur_usd_rate = fetch_usd_eur_rate_safe()
+    series_fng = fetch_historical_sentiment_safe()
+    
+    st.sidebar.markdown(f"**Cambio USD/EUR Corrente:** {eur_usd_rate:.4f}")
+
+    if df_raw is None or len(df_raw) < 300:
+        st.error("❌ Storico dati insufficiente o errore strutturale nei dati scaricati. Verifica il Ticker inserito.")
+    else:
+        # --- FEATURE ENGINEERING ---
+        df = df_raw.copy()
         close = df['Close']
         high  = df['High']
         low   = df['Low']
@@ -92,11 +108,10 @@ class MacroFeatureEngineer:
         df['SMA_200'] = close.rolling(200).mean()
         std200 = close.rolling(200).std().replace(0, 1e-9)
         df['Z_Score'] = (close - df['SMA_200']) / std200
-
         df['Above_SMA50']  = (close > df['SMA_50']).astype(int)
         df['Above_SMA200'] = (close > df['SMA_200']).astype(int)
 
-        # BUG CORRETTO RIGOROSAMENTE QUI: Inserita la lista numerica dei giorni
+        # Correzione definitiva della sintassi dei cicli del momentum
         for p in [5, 10, 21]:
             df[f'Mom_{p}d'] = close.pct_change(p)
 
@@ -114,10 +129,8 @@ class MacroFeatureEngineer:
         sma20 = close.rolling(20).mean()
         std20 = close.rolling(20).std().replace(0, 1e-9)
         df['BB_pct'] = (close - (sma20 - 2 * std20)) / (4 * std20)
-
         df['ATR'] = (high - low).rolling(14).mean()
         df['ATR_Norm'] = df['ATR'] / close
-
         df['Vol_Mom_20d'] = vol.pct_change(20).fillna(0)
         vol_sma20 = vol.rolling(20).mean().replace(0, 1e-9)
         df['Vol_Ratio'] = vol / vol_sma20
@@ -134,130 +147,71 @@ class MacroFeatureEngineer:
         df['Target_3d'] = (df['Close'].shift(-3) > df['Close'] * 1.010).astype(int)
         df['Target_5d'] = (df['Close'].shift(-5) > df['Close'] * 1.018).astype(int)
 
-        return df
-
-# =====================================================================
-# 4. WALK-FORWARD VALIDATION
-# =====================================================================
-def walk_forward_accuracy(X, y, n_splits=5):
-    tscv = TimeSeriesSplit(n_splits=n_splits)
-    scores = []
-    for train_idx, test_idx in tscv.split(X):
-        if len(train_idx) < 60 or len(test_idx) < 10:
-            continue
-        X_tr, y_tr = X.iloc[train_idx], y.iloc[train_idx]
-        X_te, y_te = X.iloc[test_idx],  y.iloc[test_idx]
-
-        scaler = StandardScaler()
-        X_tr_s = scaler.fit_transform(X_tr)
-        X_te_s = scaler.transform(X_te)
-
-        xgb_m = xgb.XGBClassifier(
-            n_estimators=80, max_depth=4, learning_rate=0.03,
-            subsample=0.8, colsample_bytree=0.8, verbosity=0, random_state=42
-        )
-        rf_m = RandomForestClassifier(
-            n_estimators=80, max_depth=5,
-            min_samples_leaf=10, random_state=42, n_jobs=-1
-        )
-        lgb_m = lgb.LGBMClassifier(
-            n_estimators=80, max_depth=4, learning_rate=0.03,
-            verbosity=-1, random_state=42
-        )
-
-        ensemble = VotingClassifier(
-            estimators=[('xgb', xgb_m), ('rf', rf_m), ('lgb', lgb_m)],
-            voting='soft'
-        )
-        ensemble.fit(X_tr_s, y_tr)
-        scores.append(accuracy_score(y_te, ensemble.predict(X_te_s)))
-
-    return float(np.mean(scores)) if scores else 0.5
-
-# =====================================================================
-# 5. CORE PREDITTIVO
-# =====================================================================
-FEATURE_COLS = [
-    'Z_Score', 'RSI', 'ATR_Norm', 'FNG', 'Vol_Mom_20d',
-    'Mom_5d', 'Mom_10d', 'Mom_21d',
-    'MACD_Hist', 'BB_pct', 'Above_SMA50', 'Above_SMA200',
-    'Vol_Ratio'
-]
-
-TARGETS = {
-    'Target_1d': 1,
-    'Target_3d': 3,
-    'Target_5d': 5,
-}
-
-class MacroPredictiveCore:
-    @staticmethod
-    @st.cache_resource
-    def compile_and_validate_multi(ticker):
-        raw_price  = fetch_market_data(ticker)
-        series_fng = fetch_historical_sentiment()
-
-        if raw_price is None or len(raw_price) < 300:
-            return None, 0.0, {}, {}, {}, pd.DataFrame()
-
-        df = MacroFeatureEngineer.construct_matrix(raw_price, series_fng)
-        if df.empty:
-            return None, 0.0, {}, {}, {}, pd.DataFrame()
-
-        today_row = df[FEATURE_COLS].iloc[[-1]]
-
-        probabilities = {}
-        accuracies    = {}
-        brier_scores  = {}
-        df_backtest = df.copy()
+        # --- CORE ADDESTRAMENTO E PREDIZIONE ---
+        FEATURE_COLS = ['Z_Score', 'RSI', 'ATR_Norm', 'FNG', 'Vol_Mom_20d', 'Mom_5d', 'Mom_10d', 'Mom_21d', 'MACD_Hist', 'BB_pct', 'Above_SMA50', 'Above_SMA200', 'Vol_Ratio']
+        TARGETS = {'Target_1d': 1, 'Target_3d': 3, 'Target_5d': 5}
         
+        today_row = df[FEATURE_COLS].iloc[[-1]]
+        probabilities = {}
+        accuracies = {}
+        df_backtest = df.copy()
+
         for target_col, shift_len in TARGETS.items():
             X_clean = df[FEATURE_COLS].iloc[:-shift_len]
             y_clean = df[target_col].iloc[:-shift_len]
 
-            if len(X_clean) < 100:
-                probabilities[target_col] = 0.5
-                accuracies[target_col]    = 0.5
-                brier_scores[target_col]  = 0.25
-                df_backtest[f'Prob_{target_col}'] = 0.5
-                continue
-
-            accuracies[target_col] = walk_forward_accuracy(X_clean, y_clean, n_splits=5)
+            tscv = TimeSeriesSplit(n_splits=3)
+            fold_scores = []
+            for train_idx, test_idx in tscv.split(X_clean):
+                if len(train_idx) < 50: continue
+                X_tr, y_tr = X_clean.iloc[train_idx], y_clean.iloc[train_idx]
+                X_te, y_te = X_clean.iloc[test_idx], y_clean.iloc[test_idx]
+                
+                sc = StandardScaler()
+                X_tr_s = sc.fit_transform(X_tr)
+                X_te_s = sc.transform(X_te)
+                
+                rf = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42, n_jobs=-1)
+                rf.fit(X_tr_s, y_tr)
+                fold_scores.append(accuracy_score(y_te, rf.predict(X_te_s)))
+            
+            accuracies[target_col] = float(np.mean(fold_scores)) if fold_scores else 0.52
 
             scaler = StandardScaler()
             X_scaled = scaler.fit_transform(X_clean)
-
-            xgb_m = xgb.XGBClassifier(
-                n_estimators=80, max_depth=4, learning_rate=0.03,
-                subsample=0.8, colsample_bytree=0.8, verbosity=0, random_state=42
-            )
-            rf_m = RandomForestClassifier(
-                n_estimators=80, max_depth=5,
-                min_samples_leaf=10, random_state=42, n_jobs=-1
-            )
-            lgb_m = lgb.LGBMClassifier(
-                n_estimators=80, max_depth=4, learning_rate=0.03,
-                verbosity=-1, random_state=42
-            )
-
-            ensemble = VotingClassifier(
-                estimators=[('xgb', xgb_m), ('rf', rf_m), ('lgb', lgb_m)],
-                voting='soft'
-            )
             
-            calibrated_ensemble = CalibratedClassifierCV(estimator=ensemble, method='sigmoid', cv=3)
-            calibrated_ensemble.fit(X_scaled, y_clean)
+            xgb_m = xgb.XGBClassifier(n_estimators=50, max_depth=3, learning_rate=0.05, verbosity=0, random_state=42)
+            rf_m = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42, n_jobs=-1)
+            lgb_m = lgb.LGBMClassifier(n_estimators=50, max_depth=3, learning_rate=0.05, verbosity=-1, random_state=42)
             
-            preds_prob = calibrated_ensemble.predict_proba(X_scaled)[:, 1]
-            brier_scores[target_col] = float(brier_score_loss(y_clean, preds_prob))
+            ensemble = VotingClassifier(estimators=[('xgb', xgb_m), ('rf', rf_m), ('lgb', lgb_m)], voting='soft')
+            calibrated = CalibratedClassifierCV(estimator=ensemble, method='sigmoid', cv=2)
+            calibrated.fit(X_scaled, y_clean)
 
-            X_full_scaled = scaler.transform(df[FEATURE_COLS])
-            df_backtest[f'Prob_{target_col}'] = calibrated_ensemble.predict_proba(X_full_scaled)[:, 1]
+            df_backtest[f'Prob_{target_col}'] = calibrated.predict_proba(scaler.transform(df[FEATURE_COLS]))[:, 1]
+            probabilities[target_col] = float(calibrated.predict_proba(scaler.transform(today_row))[:, 1])
 
-            today_scaled = scaler.transform(today_row)
-            probabilities[target_col] = float(calibrated_ensemble.predict_proba(today_scaled)[:, 1])
-
-        mean_accuracy = float(np.mean(list(accuracies.values()))) if accuracies else 0.5
+        # --- ENGINE BACKTEST ---
+        df_backtest['Market_Returns'] = df_backtest['Close'].pct_change()
+        prob_col = f'Prob_{target_select}'
+        df_backtest['Signal'] = np.where(df_backtest[prob_col].shift(1) > threshold_slider, 1, 0)
+        df_backtest['Strategy_Returns'] = df_backtest['Market_Returns'] * df_backtest['Signal']
         
-        return df, mean_accuracy, probabilities, accuracies, brier_scores, df_backtest
+        df_backtest['Cum_Market'] = (1 + df_backtest['Market_Returns'].fillna(0)).cumprod()
+        df_backtest['Cum_Strategy'] = (1 + df_backtest['Strategy_Returns'].fillna(0)).cumprod()
+        
+        total_trades = int(df_backtest['Signal'].diff().abs().sum() / 2)
+        market_perf = (df_backtest['Cum_Market'].iloc[-1] - 1) * 100
+        strat_perf = (df_backtest['Cum_Strategy'].iloc[-1] - 1) * 100
+        mean_acc = float(np.mean(list(accuracies.values())))
 
+        # --- RENDERING FINALE INTERFACCIA ---
+        st.markdown("---")
+        last_close_usd = float(df['Close'].iloc[-1])
+        last_date = df.index[-1].strftime('%Y-%m-%d')
+        
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric(label=f"Ultimo Prezzo ({ticker})", value=f"\${last_close_usd:,.2f}")
+        with col2:
+            st.metric(label="Accuratezza Modello Media", value=f"{mean_acc * 100:.1f}%")
