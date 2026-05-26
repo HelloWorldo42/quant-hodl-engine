@@ -332,9 +332,11 @@ with st.sidebar:
     threshold = st.slider("Soglia segnale BUY", 0.50, 0.80, 0.55, 0.01)
 
     st.markdown("---")
-    st.caption("Modello: ensemble soft-voting (XGBoost + LightGBM + RandomForest), "
-               "calibrato, validato walk-forward con TimeSeriesSplit.")
-    run = st.button("⬡  ESEGUI ANALISI", use_container_width=True)
+    st.caption("Come funziona: il programma guarda anni di prezzi passati, impara "
+               "qualche schema e prova a indovinare se il prezzo salirà. "
+               "Poi ti dice da solo quanto è (poco) affidabile.")
+    if st.button("⬡  ESEGUI ANALISI", use_container_width=True):
+        st.session_state["ran"] = True
 
 
 # ═════════════════════════════════════════════
@@ -347,76 +349,137 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-if not run:
-    st.info("Configura i parametri nella sidebar e premi **ESEGUI ANALISI**.")
-    st.caption("⚠️ Strumento educativo. Nessun modello prevede in modo affidabile il prezzo "
-               "delle criptovalute: i segnali NON sono consigli finanziari.")
+if not st.session_state.get("ran", False):
+    st.info("Scegli una criptovaluta nel menu a sinistra e premi **ESEGUI ANALISI**.")
+    st.caption("⚠️ App per imparare. Nessun programma prevede davvero il prezzo delle "
+               "criptovalute: quello che vedi NON è un consiglio su come investire.")
     st.stop()
 
-with st.spinner("Caricamento dati e addestramento ensemble…"):
+with st.spinner("Sto scaricando i prezzi e facendo i calcoli…"):
     res = train_pipeline(ticker, period, horizon)
 
 if not res.get("ok"):
     st.error(res.get("reason", "Errore sconosciuto."))
     st.stop()
 
-# ─── KPI ROW ───
-signal_buy = res["live_proba"] >= threshold
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Ultimo prezzo", f"${res['last_close']:,.2f}")
-c2.metric("Prob. salita", f"{res['live_proba']:.1%}",
-          delta=f"{(res['live_proba'] - 0.5) * 100:+.1f} pt vs 50%")
-c3.metric("Accuracy (walk-fwd)", f"{res['acc']:.1%}",
-          delta=f"{(res['acc'] - res['baseline']) * 100:+.1f} pt vs baseline")
-c4.metric("Brier score", f"{res['brier']:.3f}", help="Più basso è meglio (0 = perfetto)")
+# Quanto è affidabile il modello su questo asset, in parole semplici
+edge = res["acc"] - res["baseline"]
+if edge <= 0.01:
+    affidabile = False
+    voto = "SCARSA"
+else:
+    affidabile = True
+    voto = "DISCRETA" if edge < 0.05 else "BUONA"
 
-badge = ("<span class='badge-buy'>● SEGNALE: BUY</span>" if signal_buy
-         else "<span class='badge-wait'>● SEGNALE: WAIT</span>")
+# ─── KPI ROW ───
+signal_buy = res["live_proba"] >= threshold and affidabile
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Prezzo attuale", f"${res['last_close']:,.2f}")
+c2.metric("Fiducia che salga", f"{res['live_proba']:.0%}",
+          delta=f"{(res['live_proba'] - 0.5) * 100:+.0f} punti sopra/sotto il 50%",
+          help="Quanto il modello è ottimista sui prossimi giorni. "
+               "50% = come lanciare una moneta.")
+c3.metric("Quante volte ci azzecca", f"{res['acc']:.0%}",
+          delta=f"{edge * 100:+.0f} punti vs tirare a caso",
+          help="Percentuale di volte in cui, nei test sul passato, ha indovinato "
+               "la direzione. Va confrontata con il 'tirare a caso'.")
+c4.metric("Voto di affidabilità", voto,
+          help="Sintesi: il modello batte il caso? SCARSA = no, fidati poco.")
+
+if not affidabile:
+    badge = "<span class='badge-wait'>● VERDETTO: NON FIDARTI</span>"
+elif signal_buy:
+    badge = "<span class='badge-buy'>● VERDETTO: SEGNALE POSITIVO</span>"
+else:
+    badge = "<span class='badge-wait'>● VERDETTO: MEGLIO ASPETTARE</span>"
 st.markdown(badge, unsafe_allow_html=True)
+
+# ─── RIQUADRO "COSA SIGNIFICA" (in italiano corrente) ───
+if not affidabile:
+    st.warning(
+        f"**Cosa significa, in parole semplici.** Su {asset_name} questo modello "
+        f"ci azzecca circa **{res['acc']:.0%}** delle volte: praticamente come **tirare "
+        f"una monetina**, anzi un po' peggio. Quindi i suoi 'segnali' qui **non valgono nulla** "
+        "e la riga viola che salta su e giù è solo rumore. Non è un errore del programma: "
+        "è la prova, nera su bianco, che i prezzi delle crypto a breve termine **non si "
+        "possono prevedere**. Usa l'app per capire come funziona, non per decidere dove "
+        "mettere dei soldi."
+    )
+else:
+    direzione = "in salita" if res["live_proba"] >= 0.5 else "in discesa"
+    st.info(
+        f"**Cosa significa, in parole semplici.** Sui test passati questo modello ci ha "
+        f"azzeccato **{res['acc']:.0%}** delle volte, un po' meglio del caso. Adesso si "
+        f"sbilancia leggermente **{direzione}** ({res['live_proba']:.0%} di fiducia). "
+        "Resta comunque un vantaggio piccolissimo e fragile: i mercati crypto cambiano "
+        "in fretta e nessuno li prevede davvero. Trattalo come un'indicazione curiosa, "
+        "**non** come un consiglio su cui investire."
+    )
 st.markdown("")
 
-# ─── PRICE + SIGNAL CHART ───
-st.markdown("<div class='section-label'>// PREZZO & PROBABILITÀ OUT-OF-SAMPLE</div>",
+# ─── GRAFICO PREZZO + FIDUCIA ───
+st.markdown("<div class='section-label'>// PREZZO REALE vs FIDUCIA DEL MODELLO</div>",
             unsafe_allow_html=True)
+st.caption("Linea verde = prezzo vero in dollari (scala a sinistra). "
+           "Linea viola = quanto il modello era ottimista quel giorno, da 0% a 100% "
+           "(scala a destra). Più la viola sembra impazzita, meno è affidabile.")
 fig = make_subplots(specs=[[{"secondary_y": True}]])
-fig.add_trace(go.Scatter(x=res["dates"], y=res["price"], name="Prezzo",
+fig.add_trace(go.Scatter(x=res["dates"], y=res["price"], name="Prezzo reale ($)",
                          line=dict(color="#00f5d4", width=1.6)), secondary_y=False)
-fig.add_trace(go.Scatter(x=res["oof_idx"], y=res["oof_proba"], name="Prob. salita",
+fig.add_trace(go.Scatter(x=res["oof_idx"], y=res["oof_proba"] * 100,
+                         name="Fiducia che salga (%)",
                          line=dict(color="#a855f7", width=1.2), opacity=0.8),
               secondary_y=True)
+fig.add_hline(y=threshold * 100, line=dict(color="#f59e0b", width=1, dash="dot"),
+              secondary_y=True, annotation_text=f"soglia {threshold:.0%}",
+              annotation_font_color="#f59e0b")
 buy_idx = res["oof_idx"][res["oof_proba"] >= threshold]
 buy_px = res["price"].reindex(buy_idx)
-fig.add_trace(go.Scatter(x=buy_idx, y=buy_px, mode="markers", name="BUY storici",
+fig.add_trace(go.Scatter(x=buy_idx, y=buy_px, mode="markers",
+                         name="Giorni 'segnale positivo'",
                          marker=dict(color="#22c55e", size=5, symbol="triangle-up")),
               secondary_y=False)
 fig.update_layout(**PLOT_LAYOUT, height=440)
-fig.update_yaxes(title_text="USD", secondary_y=False)
-fig.update_yaxes(title_text="Prob.", range=[0, 1], secondary_y=True)
+fig.update_yaxes(title_text="Prezzo ($)", secondary_y=False)
+fig.update_yaxes(title_text="Fiducia (%)", range=[0, 100], secondary_y=True)
 st.plotly_chart(fig, use_container_width=True)
 
-# ─── FEATURE IMPORTANCE ───
+# ─── COSA GUARDA IL MODELLO + RIEPILOGO ───
+LABELS = {
+    "ret_1": "Variazione di ieri", "ret_5": "Andamento ultimi 5 giorni",
+    "ret_10": "Andamento ultimi 10 giorni", "rsi_14": "Ipercomprato/ipervenduto (RSI)",
+    "macd_hist": "Forza del trend (MACD)", "sma20_ratio": "Distanza dalla media a 20gg",
+    "sma50_ratio": "Distanza dalla media a 50gg", "bb_pct": "Posizione nelle bande",
+    "volatility": "Quanto è agitato il prezzo", "momentum": "Spinta recente",
+    "vol_ratio": "Volume di scambi",
+}
 col_a, col_b = st.columns([3, 2])
 with col_a:
-    st.markdown("<div class='section-label'>// FEATURE IMPORTANCE</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-label'>// SU COSA SI BASA IL MODELLO</div>",
+                unsafe_allow_html=True)
+    st.caption("Gli ingredienti che pesano di più nelle sue decisioni. "
+               "Più la barra è lunga, più quel dato conta.")
     order = np.argsort(res["importance"])
     fimp = go.Figure(go.Bar(
-        x=res["importance"][order], y=[res["feats"][i] for i in order],
+        x=res["importance"][order],
+        y=[LABELS.get(res["feats"][i], res["feats"][i]) for i in order],
         orientation="h", marker=dict(color="#0ea5e9")))
     fimp.update_layout(**PLOT_LAYOUT, height=360)
     st.plotly_chart(fimp, use_container_width=True)
 
 with col_b:
-    st.markdown("<div class='section-label'>// DIAGNOSTICA</div>", unsafe_allow_html=True)
+    st.markdown("<div class='section-label'>// IN BREVE</div>", unsafe_allow_html=True)
     st.dataframe(pd.DataFrame({
-        "Metrica": ["Campioni train", "Tasso salite storico", "Accuracy", "Baseline", "Brier"],
-        "Valore": [res["n_train"], f"{res['up_rate']:.1%}", f"{res['acc']:.1%}",
-                   f"{res['baseline']:.1%}", f"{res['brier']:.3f}"],
+        "Cosa": ["Giorni analizzati", "Quante volte sale di solito",
+                 "Quante volte ci azzecca", "Se tirasse a caso", "Voto"],
+        "Valore": [res["n_train"], f"{res['up_rate']:.0%}", f"{res['acc']:.0%}",
+                   f"{res['baseline']:.0%}", voto],
     }), hide_index=True, use_container_width=True)
-    if res["acc"] <= res["baseline"] + 0.01:
-        st.warning("L'accuracy non batte la baseline: il modello non ha edge reale su questo asset.")
+    if not affidabile:
+        st.warning("In parole povere: qui **non ha capacità di previsione**.")
     else:
-        st.success("Il modello batte la baseline sul backtest walk-forward.")
+        st.success("Qui fa **un pelo meglio del caso** — ma resta poco affidabile.")
 
-st.caption(f"Segnale calcolato sul bar del {res['live_date'].date()}. "
-           "⚠️ Strumento educativo, NON un consiglio finanziario. "
-           "I mercati crypto sono altamente imprevedibili.")
+st.caption(f"Calcolato il {res['live_date'].date()}. "
+           "⚠️ Questa è un'app per imparare, NON un consiglio finanziario. "
+           "Il prezzo delle criptovalute è imprevedibile e puoi perdere soldi.")
