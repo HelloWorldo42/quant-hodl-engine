@@ -5,25 +5,27 @@ import numpy as np
 import requests
 from sklearn.ensemble import VotingClassifier, RandomForestClassifier
 from sklearn.preprocessing import StandardScaler
+from sklearn.calibration import CalibratedClassifierCV
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import accuracy_score
 import xgboost as xgb
 import lightgbm as lgb
 import warnings
-
+ 
 warnings.filterwarnings('ignore')
-
+ 
 # =====================================================================
 # 1. CONFIGURAZIONE INTERFACCIA
 # =====================================================================
-st.set_page_config(page_title="QUANT HODL v12.7 - PERFECT LOGIC", layout="wide")
-
+st.set_page_config(page_title="QUANT HODL v13 - GENUINE ACCURACY", layout="wide")
+ 
 # =====================================================================
 # 2. SEZIONE API & DATA EXTRACTION (CON CACHING)
 # =====================================================================
 @st.cache_data(ttl=3600)
 def fetch_market_data(ticker):
     try:
-        df = yf.download(ticker, period="3y", progress=False)
+        df = yf.download(ticker, period="5y", progress=False)
         if df.empty:
             return None
         if isinstance(df.columns, pd.MultiIndex):
@@ -32,7 +34,7 @@ def fetch_market_data(ticker):
         return df
     except Exception:
         return None
-
+ 
 @st.cache_data(ttl=3600)
 def fetch_usd_eur_rate():
     try:
@@ -42,219 +44,214 @@ def fetch_usd_eur_rate():
         return float(df['Close'].iloc[-1])
     except Exception:
         return 0.92
-
+ 
 @st.cache_data(ttl=3600)
 def fetch_historical_sentiment():
     try:
-        r = requests.get("https://api.alternative.me/fng/?limit=100", timeout=5)
+        r = requests.get("https://alternative.me", timeout=5)
         data = r.json()['data']
         df_fng = pd.DataFrame(data)
-        df_fng['timestamp'] = pd.to_datetime(df_fng['timestamp'], unit='s')
+        df_fng['timestamp'] = pd.to_datetime(df_fng['timestamp'], unit='s').dt.normalize()
         df_fng['fng_value'] = df_fng['value'].astype(float)
         df_fng.set_index('timestamp', inplace=True)
         df_fng.index = pd.to_datetime(df_fng.index).tz_localize(None).astype('datetime64[ns]')
         return df_fng['fng_value'].sort_index()
     except Exception:
         return pd.Series(dtype=float)
-
+ 
 # =====================================================================
-# 3. ADVANCED MULTI-TARGET FEATURE ENGINEERING
+# 3. FEATURE ENGINEERING ESTESO
 # =====================================================================
 class MacroFeatureEngineer:
     @staticmethod
     def construct_matrix(df_price, series_fng):
         df = df_price.copy()
         close = df['Close']
-        
+        high  = df['High']
+        low   = df['Low']
+        vol   = df['Volume']
+ 
+        # --- Trend / Mean-reversion ---
+        df['SMA_50']  = close.rolling(50).mean()
         df['SMA_200'] = close.rolling(200).mean()
         std200 = close.rolling(200).std().replace(0, 1e-9)
         df['Z_Score'] = (close - df['SMA_200']) / std200
-        
+ 
+        # Trend regime
+        df['Above_SMA50']  = (close > df['SMA_50']).astype(int)
+        df['Above_SMA200'] = (close > df['SMA_200']).astype(int)
+ 
+        # --- Momentum multi-periodo ---
+        for p in [5, 10, 21]:
+            df[f'Mom_{p}d'] = close.pct_change(p)
+ 
+        # --- RSI (14) ---
         delta = close.diff()
         gain = delta.clip(lower=0).rolling(14).mean()
         loss = delta.clip(upper=0).abs().rolling(14).mean().replace(0, 1e-9)
         df['RSI'] = 100 - (100 / (1 + (gain / loss)))
-        df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
-        
+ 
+        # --- MACD (12-26-9) ---
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
+        macd_line = ema12 - ema26
+        signal_line = macd_line.ewm(span=9, adjust=False).mean()
+        df['MACD_Hist'] = macd_line - signal_line
+ 
+        # --- Bollinger Band %B ---
+        sma20 = close.rolling(20).mean()
+        std20 = close.rolling(20).std().replace(0, 1e-9)
+        df['BB_pct'] = (close - (sma20 - 2 * std20)) / (4 * std20)
+ 
+        # --- ATR normalizzato ---
+        df['ATR'] = (high - low).rolling(14).mean()
+        df['ATR_Norm'] = df['ATR'] / close
+ 
+        # --- Volume features ---
+        df['Vol_Mom_20d'] = vol.pct_change(20).fillna(0)
+        vol_sma20 = vol.rolling(20).mean().replace(0, 1e-9)
+        df['Vol_Ratio'] = vol / vol_sma20
+ 
+        # --- Fear & Greed Index ---
         if not series_fng.empty:
-            df['FNG_Feature'] = series_fng.reindex(df.index, method='ffill').fillna(50)
+            fng_aligned = series_fng.reindex(df.index, method='ffill').fillna(50)
+            df['FNG'] = fng_aligned.shift(1).fillna(50)
         else:
-            df['FNG_Feature'] = 50
-            
-        df['Macro_Volume_Momentum'] = df['Volume'].pct_change(20).fillna(0)
+            df['FNG'] = 50
+ 
         df = df.dropna()
-        
-        df['Target_1d'] = (df['Close'].shift(-1) > df['Close'] * 1.005).astype(int)
-        df['Target_3d'] = (df['Close'].shift(-3) > df['Close'] * 1.015).astype(int)
-        df['Target_5d'] = (df['Close'].shift(-5) > df['Close'] * 1.025).astype(int)
-        
+ 
+        # --- Target ---
+        df['Target_1d'] = (df['Close'].shift(-1) > df['Close'] * 1.003).astype(int)
+        df['Target_3d'] = (df['Close'].shift(-3) > df['Close'] * 1.010).astype(int)
+        df['Target_5d'] = (df['Close'].shift(-5) > df['Close'] * 1.018).astype(int)
+ 
         return df
-
+ 
 # =====================================================================
-# 4. MULTI-TIMEFRAME PREDICTIVE CORE
+# 4. WALK-FORWARD VALIDATION
+# =====================================================================
+def walk_forward_accuracy(X, y, n_splits=5):
+    tscv = TimeSeriesSplit(n_splits=n_splits)
+    scores = []
+    for train_idx, test_idx in tscv.split(X):
+        if len(train_idx) < 60 or len(test_idx) < 10:
+            continue
+        X_tr, y_tr = X.iloc[train_idx], y.iloc[train_idx]
+        X_te, y_te = X.iloc[test_idx],  y.iloc[test_idx]
+ 
+        scaler = StandardScaler()
+        X_tr_s = scaler.fit_transform(X_tr)
+        X_te_s  = scaler.transform(X_te)
+ 
+        xgb_m = xgb.XGBClassifier(
+            n_estimators=80, max_depth=4, learning_rate=0.03,
+            subsample=0.8, colsample_bytree=0.8,
+            verbosity=0, random_state=42
+        )
+        rf_m = RandomForestClassifier(
+            n_estimators=80, max_depth=5,
+            min_samples_leaf=10, random_state=42, n_jobs=-1
+        )
+        lgb_m = lgb.LGBMClassifier(
+            n_estimators=80, max_depth=4, learning_rate=0.03,
+            verbosity=-1, random_state=42
+        )
+ 
+        ensemble = VotingClassifier(
+            estimators=[('xgb', xgb_m), ('rf', rf_m), ('lgb', lgb_m)],
+            voting='soft'
+        )
+        ensemble.fit(X_tr_s, y_tr)
+        scores.append(accuracy_score(y_te, ensemble.predict(X_te_s)))
+ 
+    return float(np.mean(scores)) if scores else 0.5
+ 
+# =====================================================================
+# 5. CORE PREDITTIVO CON PROBABILITÀ CALIBRATE
 # =====================================================================
 class MacroPredictiveCore:
     @staticmethod
     @st.cache_resource
     def compile_and_validate_multi(ticker):
-        raw_price = fetch_market_data(ticker)
+        raw_price  = fetch_market_data(ticker)
         series_fng = fetch_historical_sentiment()
-        
-        if raw_price is None or len(raw_price) < 250:
-            return None, 0.0, {}, None
-            
+ 
+        if raw_price is None or len(raw_price) < 300:
+            return None, 0.0, {}, None, {}
+ 
         df = MacroFeatureEngineer.construct_matrix(raw_price, series_fng)
         if df.empty:
-            return None, 0.0, {}, None
-            
-        feature_cols = ['Z_Score', 'RSI', 'ATR', 'FNG_Feature', 'Macro_Volume_Momentum']
-        today_features = df.iloc[[-1]]
+            return None, 0.0, {}, None, {}
+ 
+        feature_cols = [
+            'Z_Score', 'RSI', 'ATR_Norm', 'FNG', 'Vol_Mom_20d',
+            'Mom_5d', 'Mom_10d', 'Mom_21d',
+            'MACD_Hist', 'BB_pct', 'Above_SMA50', 'Above_SMA200',
+            'Vol_Ratio'
+        ]
+ 
+        today_features = df[feature_cols].iloc[[-1]]
         
+        targets = ['Target_1d', 'Target_3d', 'Target_5d']
         probabilities = {}
-        accuracies = []
+        accuracies = {}
+        models = {}
         
-        for horizon, target_col in [("1d", "Target_1d"), ("3d", "Target_3d"), ("5d", "Target_5d")]:
-            train_df = df.iloc[:-5] 
-            X = train_df[feature_cols]
-            y = train_df[target_col]
+        scaler = StandardScaler()
+        X_full = df[feature_cols]
+        
+        for t in targets:
+            shift_len = int(t.split('_')[1].replace('d', ''))
             
-            split_idx = int(len(X) * 0.8)
-            X_tr, y_tr = X.iloc[:split_idx], y.iloc[:split_idx]
-            X_te, y_te = X.iloc[split_idx:], y.iloc[split_idx:]
+            X_train_clean = X_full.iloc[:-shift_len]
+            y_train_clean = df[t].iloc[:-shift_len]
             
-            scaler = StandardScaler()
-            X_tr_s = scaler.fit_transform(X_tr)
-            X_te_s = scaler.transform(X_te)
+            if len(X_train_clean) < 100:
+                probabilities[t] = 0.5
+                accuracies[t] = 0.5
+                continue
+                
+            acc = walk_forward_accuracy(X_train_clean, y_train_clean, n_splits=5)
+            accuracies[t] = acc
             
-            xgb_m = xgb.XGBClassifier(n_estimators=40, max_depth=3, learning_rate=0.05, verbosity=0, random_state=42)
-            rf_m = RandomForestClassifier(n_estimators=40, max_depth=4, random_state=42, n_jobs=-1)
+            X_train_scaled = scaler.fit_transform(X_train_clean)
             
-            ensemble = VotingClassifier(estimators=[('xgb', xgb_m), ('rf', rf_m)], voting='soft')
-            ensemble.fit(X_tr_s, y_tr)
-            accuracies.append(accuracy_score(y_te, ensemble.predict(X_te_s)))
+            xgb_m = xgb.XGBClassifier(n_estimators=80, max_depth=4, learning_rate=0.03, subsample=0.8, colsample_bytree=0.8, verbosity=0, random_state=42)
+            rf_m = RandomForestClassifier(n_estimators=80, max_depth=5, min_samples_leaf=10, random_state=42, n_jobs=-1)
+            lgb_m = lgb.LGBMClassifier(n_estimators=80, max_depth=4, learning_rate=0.03, verbosity=-1, random_state=42)
             
-            final_scaler = StandardScaler()
-            X_scaled = final_scaler.fit_transform(X)
-            final_ensemble = VotingClassifier(estimators=[('xgb', xgb_m), ('rf', rf_m)], voting='soft')
-            final_ensemble.fit(X_scaled, y)
+            ensemble = VotingClassifier(
+                estimators=[('xgb', xgb_m), ('rf', rf_m), ('lgb', lgb_m)],
+                voting='soft'
+            )
             
-            latest_vector = final_scaler.transform(today_features[feature_cols])
-            probabilities[horizon] = final_ensemble.predict_proba(latest_vector)[0][1]
+            calibrated_ensemble = CalibratedClassifierCV(estimator=ensemble, method='sigmoid', cv=3)
+            calibrated_ensemble.fit(X_train_scaled, y_train_clean)
             
-        return df, np.mean(accuracies), probabilities, today_features
+            today_scaled = scaler.transform(today_features)
+            prob_up = calibrated_ensemble.predict_proba(today_scaled)[0][1]
+            probabilities[t] = float(prob_up)
+            models[t] = calibrated_ensemble
+
+        mean_accuracy = float(np.mean(list(accuracies.values()))) if accuracies else 0.5
+        
+        return df, mean_accuracy, probabilities, scaler, accuracies
 
 # =====================================================================
-# 5. LOGICA OPERATIVA CORRETTA PER INVESTITORI HODL
-# =====================================================================
-def get_signal_label(prob):
-    if prob > 0.55:
-        return "🟢 COMPRA (Spinta Alta)"
-    elif prob < 0.45:
-        return "🔴 ASPETTA (Trend Debole)"
-    else:
-        return "🟡 NEUTRALE (Incertezza)"
-
-def calculate_hodl_matrix(z_score, probs, base_quota):
-    if z_score > 2.3:
-        mult = 0.0
-        status = ":red[🛑 NON COMPRARE (Prezzo Troppo Alto)]"
-        sell_action = "🚨 **VENDI IL 20%** per incassare profitto."
-    elif z_score > 1.2:
-        mult = 0.4
-        status = ":orange[⚠️ COMPRA POCO (Prezzo Alto)]"
-        sell_action = "💵 **ALLEGGERISCI**: Valuta di ridurre se hai troppa esposizione."
-    elif z_score < -0.7:
-        mult = 1.6
-        status = ":green[🔥 COMPRA COMPRA (Forte Sconto)]"
-        sell_action = "💎 **HODL** (Vietato vendere)"
-    else:
-        mult = 1.0
-        status = ":green[⚖️ COMPRA (Accumulo Standard)]"
-        sell_action = "💎 **HODL**"
-        
-    avg_prob = np.mean([probs['1d'], probs['3d'], probs['5d']])
-    
-    if avg_prob > 0.58 and mult > 0:
-        mult *= 1.25
-    elif avg_prob < 0.42 and mult > 0:
-        mult *= 0.5
-        
-    return round(base_quota * mult, 2), status, sell_action
-
-# =====================================================================
-# 6. DASHBOARD PRINCIPALE
+# 6. FUNZIONE PRINCIPALE INTERFACCIA UTENTE
 # =====================================================================
 def main():
-    st.title("🎯 QUANT HODL ENGINE v12.7")
-    st.subheader("Allineamento Logico e Protezione Portafoglio HODL")
-    st.divider()
+    st.title("📊 QUANT HODL v13 — AI Predictive Suite")
+    st.subheader("Validazione Walk-Forward Rigorosa & Probabilità di Mercato Calibrate")
     
-    base_quota = st.sidebar.number_input("Quota PAC Base (€)", min_value=10, value=100, step=10)
-    ticker_input = st.sidebar.text_input("Inserisci i Ticker separati da virgola", value="BTC-USD, TSLA, AAPL")
-    assets = [ticker.strip().upper() for ticker in ticker_input.split(",") if ticker.strip()]
+    st.sidebar.header("⚙️ Configurazione Asset")
+    ticker = st.sidebar.text_input("Ticker Yahoo Finance (es. BTC-USD, ETH-USD, AAPL)", value="BTC-USD").upper().strip()
     
-    usd_eur_rate = fetch_usd_eur_rate()
+    eur_usd_rate = fetch_usd_eur_rate()
+    st.sidebar.markdown(f"**Cambio USD/EUR Corrente:** {eur_usd_rate:.4f}")
     
-    if not assets:
-        st.info("Inserisci almeno un ticker valido nella barra laterale.")
+    if not ticker:
+        st.warning("Inserisci un ticker valido per iniziare l'analisi quantitativa.")
         return
-        
-    summary_data = []
-        
-    for asset in assets:
-        df, acc, probs, today_features = MacroPredictiveCore.compile_and_validate_multi(asset)
-        
-        if df is None or today_features is None or today_features.empty: 
-            st.sidebar.error(f"❌ Impossibile caricare '{asset}'.")
-            continue
-        
-        z_now = today_features['Z_Score'].iloc[-1]
-        price_now = today_features['Close'].iloc[-1]
-        
-        target_quota, state, sell_instruction = calculate_hodl_matrix(z_now, probs, base_quota)
-        
-        summary_data.append({"Asset": asset, "Quota da Comprare": target_quota, "Stato": state.split("]")[0].split("[")[-1] if "[" in state else state})
-        
-        if "EUR" in asset:
-            price_display = f"{price_now:,.2f} €"
-        else:
-            price_eur = price_now * usd_eur_rate
-            price_display = f"${price_now:,.2f} ({price_eur:,.2f} €)"
-        
-        with st.expander(f"🔮 MATRICE STRATEGICA: {asset}", expanded=True):
-            col1, col2 = st.columns([1, 1])
-            
-            with col1:
-                st.metric("Prezzo Attuale", price_display)
-                st.metric("Affidabilità Globale Sistema", f"{acc * 100:.1f}%")
-                st.markdown(f"### **Mossa Principale del Giorno:**\n## {state}")
-                st.markdown(f"### 💵 **Budget PAC Calcolato:** **{target_quota} €**")
-                st.info(f"**Istruzione Uscite:** {sell_instruction}")
-            
-            with col2:
-                st.markdown("### 📊 ORIZZONTI DI BREVE TERMINE IA")
-                
-                timing_schema = pd.DataFrame([
-                    {"Tempo": "⏱️ 1 GIORNO (Domani)", "Probabilità Salita": f"{probs['1d']*100:.1f}%", "Stato di Breve": get_signal_label(probs['1d'])},
-                    {"Tempo": "⏱️ 3 GIORNI", "Probabilità Salita": f"{probs['3d']*100:.1f}%", "Stato di Breve": get_signal_label(probs['3d'])},
-                    {"Tempo": "⏱️ 5 GIORNI (Settimana)", "Probabilità Salita": f"{probs['5d']*100:.1f}%", "Stato di Breve": get_signal_label(probs['5d'])}
-                ])
-                
-                st.dataframe(timing_schema, use_container_width=True, hide_index=True)
-                st.caption("Nota per accumulo: Se lo stato indica 'ASPETTA', significa semplicemente che la spinta immediata è debole, coerente con il mantenimento della posizione (HODL).")
-                
-    if summary_data:
-        st.divider()
-        st.markdown("## 📊 ORDINE DI ACQUISTO COMPLESSIVO")
-        
-        df_summary = pd.DataFrame(summary_data)
-        total_pac = df_summary["Quota da Comprare"].sum()
-        
-        col_table, col_total = st.columns([2, 1])
-        with col_table:
-            st.dataframe(df_summary, use_container_width=True, hide_index=True)
-        with col_total:
-            st.metric(label="💰 BUDGET TOTALE RICHIESTO", value=f"{total_pac:,.2f} €")
 
-if __name__ == "__main__":
-    main()
