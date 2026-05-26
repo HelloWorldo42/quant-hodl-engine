@@ -15,7 +15,7 @@ warnings.filterwarnings('ignore')
 # =====================================================================
 # 1. CONFIGURAZIONE INTERFACCIA
 # =====================================================================
-st.set_page_config(page_title="QUANT HODL v12.6 - UNMASKED ENGINE", layout="wide")
+st.set_page_config(page_title="QUANT HODL v12.7 - PERFECT LOGIC", layout="wide")
 
 # =====================================================================
 # 2. SEZIONE API & DATA EXTRACTION (CON CACHING)
@@ -144,15 +144,15 @@ class MacroPredictiveCore:
         return df, np.mean(accuracies), probabilities, today_features
 
 # =====================================================================
-# 5. LOGICA OPERATIVA TRASPARENTE
+# 5. LOGICA OPERATIVA CORRETTA PER INVESTITORI HODL
 # =====================================================================
 def get_signal_label(prob):
     if prob > 0.55:
-        return "🟢 COMPRA"
+        return "🟢 COMPRA (Spinta Alta)"
     elif prob < 0.45:
-        return "🔴 VENDI"
+        return "🔴 ASPETTA (Trend Debole)"
     else:
-        return "🟡 ASPETTA"
+        return "🟡 NEUTRALE (Incertezza)"
 
 def calculate_hodl_matrix(z_score, probs, base_quota):
     if z_score > 2.3:
@@ -185,8 +185,8 @@ def calculate_hodl_matrix(z_score, probs, base_quota):
 # 6. DASHBOARD PRINCIPALE
 # =====================================================================
 def main():
-    st.title("🎯 QUANT HODL ENGINE v12.6")
-    st.subheader("Schema dei Segnali Temporali ad Accesso Diretto")
+    st.title("🎯 QUANT HODL ENGINE v12.7")
+    st.subheader("Allineamento Logico e Protezione Portafoglio HODL")
     st.divider()
     
     base_quota = st.sidebar.number_input("Quota PAC Base (€)", min_value=10, value=100, step=10)
@@ -231,19 +231,17 @@ def main():
                 st.markdown(f"### 💵 **Budget PAC Calcolato:** **{target_quota} €**")
                 st.info(f"**Istruzione Uscite:** {sell_instruction}")
             
-            # SCHEMA NON NASCONSTO: Risposta alla tua richiesta
             with col2:
-                st.markdown("### 📊 PREVISIONI IA PER ORIZZONTE TEMPORALE")
+                st.markdown("### 📊 ORIZZONTI DI BREVE TERMINE IA")
                 
-                # Creiamo una tabella pulita direttamente visibile sullo schermo
                 timing_schema = pd.DataFrame([
-                    {"Tempo": "⏱️ 1 GIORNO (Domani)", "Probabilità Rialzo": f"{probs['1d']*100:.1f}%", "Azione Richiesta": get_signal_label(probs['1d'])},
-                    {"Tempo": "⏱️ 3 GIORNI", "Probabilità Rialzo": f"{probs['3d']*100:.1f}%", "Azione Richiesta": get_signal_label(probs['3d'])},
-                    {"Tempo": "⏱️ 5 GIORNI (Settimana)", "Probabilità Rialzo": f"{probs['5d']*100:.1f}%", "Azione Richiesta": get_signal_label(probs['5d'])}
+                    {"Tempo": "⏱️ 1 GIORNO (Domani)", "Probabilità Salita": f"{probs['1d']*100:.1f}%", "Stato di Breve": get_signal_label(probs['1d'])},
+                    {"Tempo": "⏱️ 3 GIORNI", "Probabilità Salita": f"{probs['3d']*100:.1f}%", "Stato di Breve": get_signal_label(probs['3d'])},
+                    {"Tempo": "⏱️ 5 GIORNI (Settimana)", "Probabilità Salita": f"{probs['5d']*100:.1f}%", "Stato di Breve": get_signal_label(probs['5d'])}
                 ])
                 
                 st.dataframe(timing_schema, use_container_width=True, hide_index=True)
-                st.caption("Nota: Se l'azione consiglia 'ASPETTA', significa che il trend di quel giorno è laterale o incerto.")
+                st.caption("Nota per accumulo: Se lo stato indica 'ASPETTA', significa semplicemente che la spinta immediata è debole, coerente con il mantenimento della posizione (HODL).")
                 
     if summary_data:
         st.divider()
