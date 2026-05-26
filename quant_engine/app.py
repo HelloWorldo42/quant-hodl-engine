@@ -302,10 +302,6 @@ def fetch_usd_eur_rate() -> float:
 
 @st.cache_data(ttl=3600)
 def fetch_fear_greed_history() -> pd.Series:
-    """
-    FIX: URL corretto dell'API.
-    Originale buggy usava 'https://alternative.me' → HTML, non JSON.
-    """
     try:
         url = "https://api.alternative.me/fng/?limit=500&format=json"
         r = requests.get(url, timeout=8)
@@ -347,25 +343,21 @@ def engineer_features(df_raw: pd.DataFrame, series_fng: pd.Series) -> pd.DataFra
     for p in [5, 10, 21]:
         df[f"Mom_{p}d"] = close.pct_change(p)
 
-    # RSI (protezione loss=0)
     delta = close.diff()
     gain = delta.clip(lower=0).rolling(14).mean()
     loss = delta.clip(upper=0).abs().rolling(14).mean().replace(0, 1e-9)
     df["RSI"] = 100 - (100 / (1 + gain / loss))
 
-    # MACD
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
     macd_line = ema12 - ema26
     signal_line = macd_line.ewm(span=9, adjust=False).mean()
     df["MACD_Hist"] = macd_line - signal_line
 
-    # Bollinger %B
     sma20 = close.rolling(20).mean()
     std20 = close.rolling(20).std().replace(0, 1e-9)
     df["BB_pct"] = (close - (sma20 - 2 * std20)) / (4 * std20)
 
-    # ATR normalizzato
     hl = high - low
     hc = np.abs(high - close.shift())
     lc = np.abs(low - close.shift())
@@ -373,26 +365,28 @@ def engineer_features(df_raw: pd.DataFrame, series_fng: pd.Series) -> pd.DataFra
     df["ATR"] = tr.rolling(14).mean()
     df["ATR_Norm"] = df["ATR"] / close.replace(0, 1e-9)
 
-    # Volume
     vol_sma20 = vol.rolling(20).mean().replace(0, 1e-9)
     df["Vol_Ratio"] = vol / vol_sma20
     df["Vol_Mom_20d"] = vol.pct_change(20).fillna(0)
 
-    # Fear & Greed (shift(1) → no leakage; valore ieri, non oggi)
     if not series_fng.empty:
         fng_aligned = series_fng.reindex(df.index, method="ffill").fillna(50)
         df["FNG"] = fng_aligned.shift(1).fillna(50)
     else:
         df["FNG"] = 50.0
 
-    df = df.dropna()
+    # Rimuoviamo i NaN degli indicatori ma teniamo le righe finali per la predizione live
+    df = df.replace([np.inf, -np.inf], np.nan)
+    # Rimuoviamo solo se mancano le feature (ovvero le prime 200 righe)
+    feature_cols_check = [c for c in df.columns if c not in ["Open", "High", "Low", "Close", "Volume"]]
+    df = df.dropna(subset=feature_cols_check)
 
-    # Target binari — costruiti dopo dropna; shift negativo introduce NaN → dropna finale li rimuove
+    # I target conterranno NaN solo nelle ultime righe (che escluderemo manualmente nel training)
     df["Target_1d"] = (df["Close"].shift(-1) > df["Close"] * 1.003).astype(int)
     df["Target_3d"] = (df["Close"].shift(-3) > df["Close"] * 1.010).astype(int)
     df["Target_5d"] = (df["Close"].shift(-5) > df["Close"] * 1.018).astype(int)
 
-    return df.replace([np.inf, -np.inf], np.nan).dropna()
+    return df
 
 
 # ─────────────────────────────────────────────
@@ -425,84 +419,67 @@ def build_ensemble():
 
 
 # ─────────────────────────────────────────────
-#  TRAIN & EVALUATE — TUTTI I BUG CORRETTI
+#  TRAIN & EVALUATE
 # ─────────────────────────────────────────────
 def train_and_evaluate(df: pd.DataFrame, target_col: str, shift_len: int):
-    """
-    BUG FIX #1 — return tuple sempre 6 elementi (era 5 nel branch early-exit → crash unpack)
-    BUG FIX #2 — data leakage: prob_live calcolata sull'ultimo punto OUT del training set
-    BUG FIX #3 — CalibratedClassifierCV usa cv=TimeSeriesSplit(3) non cv=int su tutto X
-    BUG FIX #4 — accuracy calcolata sull'ensemble reale, non solo su RF
-    BUG FIX #5 — n_splits=5 per walk-forward stabile
-    """
-    # Rimuovi gli ultimi `shift_len` righe: sono i dati il cui target è futuro rispetto a oggi
-    X = df[FEATURE_COLS].iloc[:-shift_len]
-    y = df[target_col].iloc[:-shift_len]
+    # Escludiamo rigorosamente le ultime righe per evitare NaN nel target e data leakage
+    X_train_set = df[FEATURE_COLS].iloc[:-shift_len]
+    y_train_set = df[target_col].iloc[:-shift_len]
 
-    # BUG FIX #1: early exit restituisce sempre 6 valori
-    if len(X) < 200:
+    if len(X_train_set) < 200:
         return None, None, 0.0, None, None, None
 
-    # BUG FIX #5: n_splits=5
     tscv = TimeSeriesSplit(n_splits=5)
     fold_scores = []
-    oof_probs = np.full(len(X), np.nan)
+    oof_probs = np.full(len(X_train_set), np.nan)
 
-    for fold, (train_idx, test_idx) in enumerate(tscv.split(X)):
+    for fold, (train_idx, test_idx) in enumerate(tscv.split(X_train_set)):
         if len(train_idx) < 80:
             continue
-        X_tr, y_tr = X.iloc[train_idx], y.iloc[train_idx]
-        X_te, y_te = X.iloc[test_idx], y.iloc[test_idx]
+        X_tr, y_tr = X_train_set.iloc[train_idx], y_train_set.iloc[train_idx]
+        X_te, y_te = X_train_set.iloc[test_idx], y_train_set.iloc[test_idx]
 
         sc = StandardScaler()
         X_tr_s = sc.fit_transform(X_tr)
         X_te_s = sc.transform(X_te)
 
-        # BUG FIX #4: score sull'ensemble, non solo RF
         m = build_ensemble()
         m.fit(X_tr_s, y_tr)
         preds = m.predict(X_te_s)
         fold_scores.append(accuracy_score(y_te, preds))
 
-        # Out-of-fold probs (solo dati test → zero leakage)
         probs = m.predict_proba(X_te_s)[:, 1]
         oof_probs[test_idx] = probs
 
     accuracy = float(np.mean(fold_scores)) if fold_scores else 0.5
 
-    # Modello finale su TUTTO X per predizione live
+    # Fit finale su tutta la porzione provvista di target valido
     scaler_final = StandardScaler()
-    X_scaled = scaler_final.fit_transform(X)
+    X_scaled = scaler_final.fit_transform(X_train_set)
     ensemble_final = build_ensemble()
 
-    # BUG FIX #3: CalibratedClassifierCV con TimeSeriesSplit → no leakage nella calibrazione
     calibrated = CalibratedClassifierCV(
         estimator=ensemble_final,
         method="sigmoid",
         cv=TimeSeriesSplit(n_splits=3),
     )
-    calibrated.fit(X_scaled, y)
+    calibrated.fit(X_scaled, y_train_set)
 
-    # BUG FIX #2: prob_live su punto SUCCESSIVO all'ultimo training point
-    # Usiamo l'ultima riga del dataframe COMPLETO (che il training non ha visto)
+    # PREDIZIONE LIVE: Calcolata sull'ULTIMA RIGA ASSOLUTA del dataset (Oggi)
     last_row = df[FEATURE_COLS].iloc[[-1]]
     prob_live = float(
         calibrated.predict_proba(scaler_final.transform(last_row))[:, 1]
     )
 
-    brier = brier_score_loss(y, calibrated.predict_proba(X_scaled)[:, 1])
+    brier = brier_score_loss(y_train_set, calibrated.predict_proba(X_scaled)[:, 1])
 
     return calibrated, scaler_final, accuracy, prob_live, brier, oof_probs
 
 
 # ─────────────────────────────────────────────
-#  BACKTEST BUILDER — no double-shift
+#  BACKTEST BUILDER
 # ─────────────────────────────────────────────
 def build_backtest_series(df, oof_probs_dict, shift_lens):
-    """
-    BUG FIX #6: rimosso .shift(1) ridondante sul segnale —
-    le OOF probabilities sono già riferite al giorno corretto.
-    """
     df_bt = df.copy()
     df_bt["Market_Returns"] = df_bt["Close"].pct_change()
 
@@ -516,20 +493,16 @@ def build_backtest_series(df, oof_probs_dict, shift_lens):
 
 
 # ─────────────────────────────────────────────
-#  PREDICTIVE BAND — proiezione AI
+#  PREDICTIVE BAND
 # ─────────────────────────────────────────────
 def make_prediction_band(df, model, scaler, prob_live, n_days=14):
-    """
-    Genera banda predittiva Monte Carlo con bias derivato dalla prob_live.
-    Non è una predizione di prezzo — è un'envelope probabilistica.
-    """
     last_price = df["Close"].iloc[-1]
     last_vol = df["Close"].pct_change().rolling(21).std().iloc[-1]
     last_vol = last_vol if last_vol > 0 else 0.02
 
     np.random.seed(42)
     n_sims = 500
-    bias = (prob_live - 0.5) * 0.3   # bias direzionale dalla prob calibrata
+    bias = (prob_live - 0.5) * 0.3
 
     paths = np.zeros((n_sims, n_days))
     for sim in range(n_sims):
@@ -584,7 +557,6 @@ if len(df) < 200:
     st.error("❌ Troppo pochi dati dopo il feature engineering.")
     st.stop()
 
-# BUG FIX #7 — progress bar in try/finally: non resta bloccata su crash
 results = {}
 oof_probs_all = {}
 progress_bar = st.progress(0, text="Addestrando modelli AI...")
@@ -596,7 +568,6 @@ try:
             text=f"[{i+1}/{len(TARGETS)}] Training {target_col}...",
         )
         out = train_and_evaluate(df, target_col, shift_len)
-        # out è sempre 6-tupla grazie al BUG FIX #1
         model, scaler, accuracy, prob_live, brier, oof_probs = out
         results[target_col] = {
             "model": model,
@@ -615,7 +586,6 @@ df_bt = build_backtest_series(df, oof_probs_all, TARGETS)
 
 oof_col = f"OOF_Prob_{target_select}"
 if oof_col in df_bt.columns:
-    # BUG FIX #6: nessun shift ridondante
     df_bt["Signal"] = np.where(df_bt[oof_col] > threshold_slider, 1, 0)
     df_bt["Strategy_Returns"] = df_bt["Market_Returns"] * df_bt["Signal"]
 else:
@@ -625,7 +595,6 @@ else:
 df_bt["Cum_Market"] = (1 + df_bt["Market_Returns"].fillna(0)).cumprod()
 df_bt["Cum_Strategy"] = (1 + df_bt["Strategy_Returns"].fillna(0)).cumprod()
 
-# Metriche aggregate
 mean_acc = float(np.mean([r["accuracy"] for r in results.values()]))
 market_perf = (df_bt["Cum_Market"].iloc[-1] - 1) * 100
 strat_perf = (df_bt["Cum_Strategy"].iloc[-1] - 1) * 100
@@ -634,15 +603,11 @@ total_trades = int(df_bt["Signal"].diff().abs().fillna(0).sum() / 2)
 # ─────────────────────────────────────────────
 #  UI RENDERING
 # ─────────────────────────────────────────────
-
 last_price = float(df["Close"].iloc[-1])
 last_date = df.index[-1].strftime("%Y-%m-%d")
-
-# BUG FIX #8: FNG mostra "ieri" (è già shiftato di 1 per no-leakage)
 fng_now = int(df["FNG"].iloc[-1])
 fng_label = "Fear & Greed (ieri)"
 
-# ── HEADER METRICS ──────────────────────────
 st.markdown('<div class="section-label">LIVE MARKET DATA</div>', unsafe_allow_html=True)
 
 c1, c2, c3, c4, c5 = st.columns(5)
@@ -654,7 +619,6 @@ c5.metric("BUY & HOLD", f"{market_perf:+.1f}%")
 
 st.markdown("---")
 
-# ── PROBABILITÀ LIVE ─────────────────────────
 st.markdown('<div class="section-label">AI SIGNAL — PROBABILITÀ LIVE CALIBRATE</div>', unsafe_allow_html=True)
 
 p1, p2, p3 = st.columns(3)
@@ -690,7 +654,6 @@ for col, (t, label, thresh_label) in zip(signal_cols, horizon_info):
 
 st.markdown("---")
 
-# ── GRAFICO PREDITTIVO AVANZATO ───────────────
 st.markdown('<div class="section-label">PREDICTIVE CHART — PREZZI + BANDA AI MONTE CARLO</div>', unsafe_allow_html=True)
 
 ref_model = results[target_select]["model"]
@@ -704,7 +667,6 @@ if show_pred_band and ref_model is not None:
 
 fig_price = go.Figure()
 
-# Candlestick ultimi 180 giorni
 df_tail = df_raw.iloc[-180:]
 fig_price.add_trace(go.Candlestick(
     x=df_tail.index,
@@ -720,7 +682,6 @@ fig_price.add_trace(go.Candlestick(
     line=dict(width=1),
 ))
 
-# SMA overlay
 df_ind = df.iloc[-180:]
 fig_price.add_trace(go.Scatter(
     x=df_ind.index, y=df_ind["SMA_50"],
@@ -733,9 +694,7 @@ fig_price.add_trace(go.Scatter(
     opacity=0.8,
 ))
 
-# Prediction band
 if show_pred_band and ref_model is not None:
-    # 10-90 envelope
     fig_price.add_trace(go.Scatter(
         x=list(dates_fut) + list(dates_fut[::-1]),
         y=list(p90) + list(p10[::-1]),
@@ -745,7 +704,6 @@ if show_pred_band and ref_model is not None:
         name="Banda 10–90%",
         hoverinfo="skip",
     ))
-    # 25-75 envelope
     fig_price.add_trace(go.Scatter(
         x=list(dates_fut) + list(dates_fut[::-1]),
         y=list(p75) + list(p25[::-1]),
@@ -755,13 +713,11 @@ if show_pred_band and ref_model is not None:
         name="Banda 25–75%",
         hoverinfo="skip",
     ))
-    # Mediana
     fig_price.add_trace(go.Scatter(
         x=dates_fut, y=p50,
         name="Mediana AI",
         line=dict(color="#0ea5e9", width=2, dash="longdash"),
     ))
-    # Linea di connessione verticale
     fig_price.add_vline(
         x=df.index[-1],
         line_width=1,
@@ -782,9 +738,8 @@ fig_price.update_layout(
     height=500,
 )
 
-st.plotly_chart(fig_price, use_container_width=True)
+st.plotly_chart(fig_price, on_select="ignore")
 
-# ── BACKTEST CHART ────────────────────────────
 st.markdown('<div class="section-label">BACKTEST — STRATEGIA AI vs BUY & HOLD</div>', unsafe_allow_html=True)
 
 m1, m2, m3, m4 = st.columns(4)
@@ -819,9 +774,8 @@ fig_bt.update_layout(
     yaxis_title="Capitale (1 = start)",
     height=380,
 )
-st.plotly_chart(fig_bt, use_container_width=True)
+st.plotly_chart(fig_bt, on_select="ignore")
 
-# ── RSI + MACD SUBPLOT ────────────────────────
 st.markdown('<div class="section-label">OSCILLATORI TECNICI — RSI + MACD</div>', unsafe_allow_html=True)
 
 df_osc = df.iloc[-180:]
@@ -853,9 +807,8 @@ fig_osc.update_yaxes(
     gridcolor="rgba(0,245,212,0.05)",
     linecolor="rgba(0,245,212,0.15)",
 )
-st.plotly_chart(fig_osc, use_container_width=True)
+st.plotly_chart(fig_osc, on_select="ignore")
 
-# ── TABELLA METRICHE ──────────────────────────
 st.markdown('<div class="section-label">MODEL METRICS TABLE</div>', unsafe_allow_html=True)
 
 rows = []
@@ -874,7 +827,6 @@ for target_col, r in results.items():
 
 st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
-# ── FOOTER ───────────────────────────────────
 st.markdown("---")
 st.markdown(f"""
 <div style="font-family:'Share Tech Mono',monospace;font-size:0.65rem;color:#334155;
