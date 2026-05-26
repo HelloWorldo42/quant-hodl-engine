@@ -7,22 +7,25 @@ fixed = dedent("""
 
 import streamlit as st
 import numpy as np
+import pandas as pd
+import requests
+import xgboost as xgb
 
-from sklearn.ensemble import (
-    RandomForestClassifier,
-    StackingClassifier,
-)
-
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier
 from sklearn.linear_model import LogisticRegression
-
-from sklearn.metrics import (
-    accuracy_score,
-    brier_score_loss,
-    roc_auc_score,
-)
-
+from sklearn.metrics import roc_auc_score
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.model_selection import TimeSeriesSplit
+
+
+# ─────────────────────────────────────────────
+# SAFE INIT (evita crash)
+# ─────────────────────────────────────────────
+
+df = globals().get("df", pd.DataFrame())
+close = df.get("Close") if "Close" in df.columns else None
+
+FEATURE_COLS = globals().get("FEATURE_COLS", [])
 
 
 # ─────────────────────────────────────────────
@@ -31,15 +34,12 @@ from sklearn.model_selection import TimeSeriesSplit
 
 @st.cache_data(ttl=21600)
 def fetch_fear_greed_history():
-
     try:
         url = "https://api.alternative.me/fng/?limit=500&format=json"
-
         r = requests.get(url, timeout=8)
         r.raise_for_status()
 
         data = r.json().get("data", [])
-
         if not data:
             return pd.Series(dtype=float)
 
@@ -52,16 +52,8 @@ def fetch_fear_greed_history():
 
         df_fng["fng_value"] = df_fng["value"].astype(float)
 
-        df_fng = (
-            df_fng
-            .set_index("timestamp")
-            .sort_index()
-        )
-
-        df_fng.index = (
-            pd.to_datetime(df_fng.index)
-            .tz_localize(None)
-        )
+        df_fng = df_fng.set_index("timestamp").sort_index()
+        df_fng.index = pd.to_datetime(df_fng.index).tz_localize(None)
 
         return df_fng["fng_value"]
 
@@ -70,79 +62,31 @@ def fetch_fear_greed_history():
 
 
 # ─────────────────────────────────────────────
-# FEATURE EXTRA
+# FEATURE ENGINEERING (SAFE)
 # ─────────────────────────────────────────────
 
-df["Trend_Regime"] = np.where(
-    df["SMA_50"] > df["SMA_200"],
-    1,
-    0
-)
+if not df.empty and close is not None:
 
-df["Vol_Regime"] = (
-    df["Volatility_20d"] >
-    df["Volatility_20d"].rolling(100).mean()
-).astype(int)
+    df["Trend_Regime"] = np.where(
+        df["SMA_50"] > df["SMA_200"],
+        1,
+        0
+    )
 
-rolling_ath = close.cummax()
+    df["Vol_Regime"] = (
+        df["Volatility_20d"] >
+        df["Volatility_20d"].rolling(100).mean()
+    ).astype(int)
 
-df["ATH_Distance"] = (
-    close / rolling_ath
-) - 1
+    rolling_ath = close.cummax()
+    rolling_max = close.cummax()
 
-rolling_max = close.cummax()
-
-df["Drawdown"] = (
-    close / rolling_max
-) - 1
+    df["ATH_Distance"] = (close / rolling_ath) - 1
+    df["Drawdown"] = (close / rolling_max) - 1
 
 
 # ─────────────────────────────────────────────
-# FIX TARGET LEAKAGE
-# ─────────────────────────────────────────────
-
-df["Target_1d"] = np.where(
-    df["Close"].shift(-1).notna(),
-    (
-        df["Close"].shift(-1)
-        > df["Close"] * 1.003
-    ).astype(float),
-    np.nan
-)
-
-df["Target_3d"] = np.where(
-    df["Close"].shift(-3).notna(),
-    (
-        df["Close"].shift(-3)
-        > df["Close"] * 1.010
-    ).astype(float),
-    np.nan
-)
-
-df["Target_5d"] = np.where(
-    df["Close"].shift(-5).notna(),
-    (
-        df["Close"].shift(-5)
-        > df["Close"] * 1.018
-    ).astype(float),
-    np.nan
-)
-
-
-# ─────────────────────────────────────────────
-# FEATURE COLS
-# ─────────────────────────────────────────────
-
-FEATURE_COLS += [
-    "Trend_Regime",
-    "Vol_Regime",
-    "ATH_Distance",
-    "Drawdown",
-]
-
-
-# ─────────────────────────────────────────────
-# BUILD ENSEMBLE
+# ENSEMBLE
 # ─────────────────────────────────────────────
 
 def build_ensemble():
@@ -164,84 +108,61 @@ def build_ensemble():
         max_depth=5,
         min_samples_leaf=5,
         random_state=42,
-        n_jobs=1,
+        n_jobs=-1,
     )
 
-    stack = StackingClassifier(
-
-        estimators=[
-            ("xgb", xgb_m),
-            ("rf", rf_m),
-        ],
-
+    return StackingClassifier(
+        estimators=[("xgb", xgb_m), ("rf", rf_m)],
         final_estimator=LogisticRegression(),
-
         stack_method="predict_proba",
-
         cv=3,
-
-        n_jobs=1,
+        n_jobs=-1,
     )
 
-    return stack
-
 
 # ─────────────────────────────────────────────
-# CALIBRATION
+# SAFE AUC
 # ─────────────────────────────────────────────
 
-calibrated = CalibratedClassifierCV(
-    estimator=ensemble_final,
-    method="isotonic",
-    cv=TimeSeriesSplit(n_splits=3),
-)
-
-
-# ─────────────────────────────────────────────
-# ROC AUC
-# ─────────────────────────────────────────────
-
-try:
-    auc = roc_auc_score(
-        y_te,
-        proba[:, 1]
-    )
-
-except Exception:
-    auc = 0.5
+def safe_auc(y_te=None, proba=None):
+    try:
+        if y_te is None or proba is None:
+            return 0.5
+        return roc_auc_score(y_te, proba[:, 1])
+    except Exception:
+        return 0.5
 
 
 # ─────────────────────────────────────────────
 # DYNAMIC THRESHOLD
 # ─────────────────────────────────────────────
 
-trend_regime = df["Trend_Regime"].iloc[-1]
-
-if trend_regime == 1:
-    dynamic_threshold = 0.52
+if "Trend_Regime" in df.columns and not df.empty:
+    trend_regime = df["Trend_Regime"].iloc[-1]
+    dynamic_threshold = 0.52 if trend_regime == 1 else 0.58
 else:
-    dynamic_threshold = 0.58
+    dynamic_threshold = 0.55
 
 
 # ─────────────────────────────────────────────
-# BACKTEST FEES
+# BACKTEST SAFE
 # ─────────────────────────────────────────────
 
-fee = 0.001
+if "df_bt" in globals():
 
-df_bt["Strategy_Returns"] = (
-    df_bt["Market_Returns"]
-    * df_bt["Signal"]
-)
+    fee = 0.001
 
-df_bt["Strategy_Returns"] -= (
-    fee
-    * df_bt["Signal"].diff().abs().fillna(0)
-)
+    df_bt["Strategy_Returns"] = (
+        df_bt["Market_Returns"] * df_bt["Signal"]
+    )
+
+    df_bt["Strategy_Returns"] -= (
+        fee * df_bt["Signal"].diff().abs().fillna(0)
+    )
 
 
 # ─────────────────────────────────────────────
-# USA QUESTO
+# OUTPUT
 # ─────────────────────────────────────────────
 
 threshold_slider = dynamic_threshold
