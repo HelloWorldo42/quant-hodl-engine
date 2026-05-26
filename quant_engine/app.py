@@ -15,7 +15,7 @@ warnings.filterwarnings('ignore')
 # =====================================================================
 # 1. CONFIGURAZIONE INTERFACCIA
 # =====================================================================
-st.set_page_config(page_title="QUANT HODL v12.5 - MULTI-TIMEFRAME ENGINE", layout="wide")
+st.set_page_config(page_title="QUANT HODL v12.6 - UNMASKED ENGINE", layout="wide")
 
 # =====================================================================
 # 2. SEZIONE API & DATA EXTRACTION (CON CACHING)
@@ -84,7 +84,6 @@ class MacroFeatureEngineer:
         df['Macro_Volume_Momentum'] = df['Volume'].pct_change(20).fillna(0)
         df = df.dropna()
         
-        # Tre Target distinti: 1 giorno, 3 giorni, 5 giorni
         df['Target_1d'] = (df['Close'].shift(-1) > df['Close'] * 1.005).astype(int)
         df['Target_3d'] = (df['Close'].shift(-3) > df['Close'] * 1.015).astype(int)
         df['Target_5d'] = (df['Close'].shift(-5) > df['Close'] * 1.025).astype(int)
@@ -111,16 +110,14 @@ class MacroPredictiveCore:
         feature_cols = ['Z_Score', 'RSI', 'ATR', 'FNG_Feature', 'Macro_Volume_Momentum']
         today_features = df.iloc[[-1]]
         
-        # Validazione e predizione per i 3 orizzonti temporali
         probabilities = {}
         accuracies = []
         
         for horizon, target_col in [("1d", "Target_1d"), ("3d", "Target_3d"), ("5d", "Target_5d")]:
-            train_df = df.iloc[:-5] # Evita data leakage
+            train_df = df.iloc[:-5] 
             X = train_df[feature_cols]
             y = train_df[target_col]
             
-            # Singolo split walk-forward veloce per stabilità
             split_idx = int(len(X) * 0.8)
             X_tr, y_tr = X.iloc[:split_idx], y.iloc[:split_idx]
             X_te, y_te = X.iloc[split_idx:], y.iloc[split_idx:]
@@ -136,7 +133,6 @@ class MacroPredictiveCore:
             ensemble.fit(X_tr_s, y_tr)
             accuracies.append(accuracy_score(y_te, ensemble.predict(X_te_s)))
             
-            # Predizione finale
             final_scaler = StandardScaler()
             X_scaled = final_scaler.fit_transform(X)
             final_ensemble = VotingClassifier(estimators=[('xgb', xgb_m), ('rf', rf_m)], voting='soft')
@@ -148,10 +144,17 @@ class MacroPredictiveCore:
         return df, np.mean(accuracies), probabilities, today_features
 
 # =====================================================================
-# 5. LOGICA OPERATIVA COMBINATA CON IA MULTI-TEMPORALE
+# 5. LOGICA OPERATIVA TRASPARENTE
 # =====================================================================
+def get_signal_label(prob):
+    if prob > 0.55:
+        return "🟢 COMPRA"
+    elif prob < 0.45:
+        return "🔴 VENDI"
+    else:
+        return "🟡 ASPETTA"
+
 def calculate_hodl_matrix(z_score, probs, base_quota):
-    # Base deterministica dallo Z-Score
     if z_score > 2.3:
         mult = 0.0
         status = ":red[🛑 NON COMPRARE (Prezzo Troppo Alto)]"
@@ -169,7 +172,6 @@ def calculate_hodl_matrix(z_score, probs, base_quota):
         status = ":green[⚖️ COMPRA (Accumulo Standard)]"
         sell_action = "💎 **HODL**"
         
-    # Calcolo della spinta aggregata (Media pesata o trend)
     avg_prob = np.mean([probs['1d'], probs['3d'], probs['5d']])
     
     if avg_prob > 0.58 and mult > 0:
@@ -177,22 +179,14 @@ def calculate_hodl_matrix(z_score, probs, base_quota):
     elif avg_prob < 0.42 and mult > 0:
         mult *= 0.5
         
-    # Definizione del testo del Trend visivo
-    if probs['1d'] > 0.52 and probs['5d'] > 0.52:
-        trend_label = "🟢 RIALZO COMPATTO"
-    elif probs['1d'] < 0.45 and probs['5d'] < 0.45:
-        trend_label = "🔴 RIBASSO COMPATTO"
-    else:
-        trend_label = "🟡 LATERALE / INCERTO"
-        
-    return round(base_quota * mult, 2), status, sell_action, trend_label
+    return round(base_quota * mult, 2), status, sell_action
 
 # =====================================================================
 # 6. DASHBOARD PRINCIPALE
 # =====================================================================
 def main():
-    st.title("🎯 QUANT HODL ENGINE v12.5")
-    st.subheader("Analisi Quantitativa Integrata su Orizzonti Organizzati (1d, 3d, 5d)")
+    st.title("🎯 QUANT HODL ENGINE v12.6")
+    st.subheader("Schema dei Segnali Temporali ad Accesso Diretto")
     st.divider()
     
     base_quota = st.sidebar.number_input("Quota PAC Base (€)", min_value=10, value=100, step=10)
@@ -217,7 +211,7 @@ def main():
         z_now = today_features['Z_Score'].iloc[-1]
         price_now = today_features['Close'].iloc[-1]
         
-        target_quota, state, sell_instruction, trend_label = calculate_hodl_matrix(z_now, probs, base_quota)
+        target_quota, state, sell_instruction = calculate_hodl_matrix(z_now, probs, base_quota)
         
         summary_data.append({"Asset": asset, "Quota da Comprare": target_quota, "Stato": state.split("]")[0].split("[")[-1] if "[" in state else state})
         
@@ -227,22 +221,29 @@ def main():
             price_eur = price_now * usd_eur_rate
             price_display = f"${price_now:,.2f} ({price_eur:,.2f} €)"
         
-        # Stringa di aiuto per il popup del mouse
-        help_string = f"Dettaglio Probabilità:\n• 1 Giorno: {probs['1d']*100:.1f}%\n• 3 Giorni: {probs['3d']*100:.1f}%\n• 5 Giorni: {probs['5d']*100:.1f}%"
-        
-        with st.expander(f"🔮 SEGNO CORRENTE: {asset}", expanded=True):
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Prezzo Attuale", price_display)
-            col2.metric("Affidabilità Motore (Media)", f"{acc * 100:.1f}%")
-            col3.metric("Trend IA Multi-Timeframe", trend_label, help=help_string)
+        with st.expander(f"🔮 MATRICE STRATEGICA: {asset}", expanded=True):
+            col1, col2 = st.columns([1, 1])
             
-            c_box1, c_box2 = st.columns(2)
-            with c_box1:
-                st.markdown(f"### **Cosa fare oggi:**\n## {state}")
-                st.markdown(f"### 💵 **Quota da investire nel PAC:** **{target_quota} €**")
-            with c_box2:
-                st.markdown("### **Se hai bisogno di ribilanciare:**")
-                st.info(f"{sell_instruction}")
+            with col1:
+                st.metric("Prezzo Attuale", price_display)
+                st.metric("Affidabilità Globale Sistema", f"{acc * 100:.1f}%")
+                st.markdown(f"### **Mossa Principale del Giorno:**\n## {state}")
+                st.markdown(f"### 💵 **Budget PAC Calcolato:** **{target_quota} €**")
+                st.info(f"**Istruzione Uscite:** {sell_instruction}")
+            
+            # SCHEMA NON NASCONSTO: Risposta alla tua richiesta
+            with col2:
+                st.markdown("### 📊 PREVISIONI IA PER ORIZZONTE TEMPORALE")
+                
+                # Creiamo una tabella pulita direttamente visibile sullo schermo
+                timing_schema = pd.DataFrame([
+                    {"Tempo": "⏱️ 1 GIORNO (Domani)", "Probabilità Rialzo": f"{probs['1d']*100:.1f}%", "Azione Richiesta": get_signal_label(probs['1d'])},
+                    {"Tempo": "⏱️ 3 GIORNI", "Probabilità Rialzo": f"{probs['3d']*100:.1f}%", "Azione Richiesta": get_signal_label(probs['3d'])},
+                    {"Tempo": "⏱️ 5 GIORNI (Settimana)", "Probabilità Rialzo": f"{probs['5d']*100:.1f}%", "Azione Richiesta": get_signal_label(probs['5d'])}
+                ])
+                
+                st.dataframe(timing_schema, use_container_width=True, hide_index=True)
+                st.caption("Nota: Se l'azione consiglia 'ASPETTA', significa che il trend di quel giorno è laterale o incerto.")
                 
     if summary_data:
         st.divider()
@@ -256,7 +257,6 @@ def main():
             st.dataframe(df_summary, use_container_width=True, hide_index=True)
         with col_total:
             st.metric(label="💰 BUDGET TOTALE RICHIESTO", value=f"{total_pac:,.2f} €")
-            st.caption("Esegui gli ordini sul tuo broker usando queste quote esatte.")
 
 if __name__ == "__main__":
     main()
