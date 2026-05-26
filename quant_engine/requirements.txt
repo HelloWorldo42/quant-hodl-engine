@@ -2,8 +2,7 @@ streamlit
 yfinance
 pandas
 numpy
-requests
 scikit-learn
 xgboost
-lightgbm
 plotly
+requests
