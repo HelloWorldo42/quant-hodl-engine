@@ -26,45 +26,37 @@ st.set_page_config(page_title="QUANT HODL v13 - GENUINE ACCURACY", layout="wide"
 @st.cache_data(ttl=1800)
 def fetch_market_data(ticker):
     try:
-        # Scarichiamo i dati esplicitando il comportamento dell'indice multilivello
-        df = yf.download(ticker, period="5y", progress=False, multi_level_index=False)
+        df = yf.download(ticker, period="5y", progress=False)
         if df.empty:
             return None
         
-        # Gestione drastica del MultiIndex se presente (per vecchie/nuove versioni concorrenti)
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
+            df.columns = df.columns.get_level_values(0)
             
-        # Forziamo la conversione dei nomi delle colonne in stringhe piatte e pulite
         df.columns = [str(c).strip().capitalize() for c in df.columns]
         
-        # Rimappiamo le colonne principali per tollerare variazioni di maiuscole/minuscole
         rename_dict = {
             'Open': 'Open', 'High': 'High', 'Low': 'Low', 
             'Close': 'Close', 'Adj close': 'Close', 'Volume': 'Volume'
         }
         df = df.rename(columns=rename_dict)
         
-        # Verifichiamo se le colonne essenziali sono presenti
         required = ['Open', 'High', 'Low', 'Close', 'Volume']
         if not all(col in df.columns for col in required):
             return None
             
-        # Isoliamo solo le colonne necessarie convertendole in serie standard float64
         df_cleaned = df[required].astype(float)
         df_cleaned.index = pd.to_datetime(df_cleaned.index).tz_localize(None).astype('datetime64[ns]')
-        
         return df_cleaned
-    except Exception as e:
-        st.sidebar.error(f"Errore caricamento mercato: {str(e)}")
+    except Exception:
         return None
 
 @st.cache_data(ttl=3600)
 def fetch_usd_eur_rate():
     try:
-        df = yf.download("USDEUR=X", period="5d", progress=False, multi_level_index=False)
+        df = yf.download("USDEUR=X", period="5d", progress=False)
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
+            df.columns = df.columns.get_level_values(0)
         df.columns = [str(c).strip().capitalize() for c in df.columns]
         return float(df['Close'].iloc[-1])
     except Exception:
@@ -82,7 +74,6 @@ def fetch_historical_sentiment():
         df_fng.index = pd.to_datetime(df_fng.index).tz_localize(None).astype('datetime64[ns]')
         return df_fng['fng_value'].sort_index()
     except Exception:
-        # Fallback se le API esterne di sentiment sono temporaneamente offline
         return pd.Series(dtype=float)
 
 # =====================================================================
@@ -105,7 +96,6 @@ class MacroFeatureEngineer:
         df['Above_SMA50']  = (close > df['SMA_50']).astype(int)
         df['Above_SMA200'] = (close > df['SMA_200']).astype(int)
 
-        # Corretto l'elenco esplicito dei periodi numerici
         for p in [5, 10, 21]:
             df[f'Mom_{p}d'] = close.pct_change(p)
 
@@ -257,3 +247,17 @@ class MacroPredictiveCore:
             calibrated_ensemble = CalibratedClassifierCV(estimator=ensemble, method='sigmoid', cv=3)
             calibrated_ensemble.fit(X_scaled, y_clean)
             
+            preds_prob = calibrated_ensemble.predict_proba(X_scaled)[:, 1]
+            brier_scores[target_col] = float(brier_score_loss(y_clean, preds_prob))
+
+            X_full_scaled = scaler.transform(df[FEATURE_COLS])
+            df_backtest[f'Prob_{target_col}'] = calibrated_ensemble.predict_proba(X_full_scaled)[:, 1]
+
+            today_scaled = scaler.transform(today_row)
+            probabilities[target_col] = float(calibrated_ensemble.predict_proba(today_scaled)[:, 1])
+
+        mean_accuracy = float(np.mean(list(accuracies.values()))) if accuracies else 0.5
+        
+        return df, mean_accuracy, probabilities, accuracies, brier_scores, df_backtest
+
+# =====================================================================
