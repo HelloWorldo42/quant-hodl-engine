@@ -24,9 +24,12 @@ st.set_page_config(page_title="QUANT HODL v12.1 - PURIFIED ENGINE", layout="wide
 def fetch_market_data(ticker):
     try:
         df = yf.download(ticker, period="3y", progress=False)
+        if df.empty:
+            return None
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.droplevel(1)
-        df.index = df.index.tz_localize(None)
+            df.columns = df.columns.get_level_values(0)
+        # FIX: Forzatura tipo e precisione nanosecondo (ns)
+        df.index = pd.to_datetime(df.index).tz_localize(None).astype('datetime64[ns]')
         return df
     except Exception:
         return None
@@ -40,7 +43,8 @@ def fetch_historical_sentiment():
         df_fng['timestamp'] = pd.to_datetime(df_fng['timestamp'], unit='s')
         df_fng['fng_value'] = df_fng['value'].astype(float)
         df_fng.set_index('timestamp', inplace=True)
-        df_fng.index = df_fng.index.tz_localize(None)
+        # FIX: Forzatura tipo e precisione nanosecondo (ns) per match perfetto
+        df_fng.index = pd.to_datetime(df_fng.index).tz_localize(None).astype('datetime64[ns]')
         return df_fng['fng_value'].sort_index()
     except Exception:
         return pd.Series(dtype=float)
@@ -64,7 +68,12 @@ class MacroFeatureEngineer:
         df['RSI'] = 100 - (100 / (1 + (gain / loss)))
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
         
-        df['FNG_Feature'] = series_fng.reindex(df.index, method='ffill').fillna(50)
+        # Allineamento sicuro post-conversione dtypes
+        if not series_fng.empty:
+            df['FNG_Feature'] = series_fng.reindex(df.index, method='ffill').fillna(50)
+        else:
+            df['FNG_Feature'] = 50
+            
         df['Macro_Volume_Momentum'] = df['Volume'].pct_change(20).fillna(0)
         
         df = df.dropna()
@@ -86,7 +95,9 @@ class MacroPredictiveCore:
             return None, 0.0, 0.0, None
             
         df = MacroFeatureEngineer.construct_matrix(raw_price, series_fng)
-        
+        if df.empty:
+            return None, 0.0, 0.0, None
+            
         train_df = df.iloc[:-5] 
         today_features = df.iloc[[-1]] 
         
@@ -176,7 +187,8 @@ def main():
         
     for asset in assets:
         df, acc, prob_up, today_features = MacroPredictiveCore.compile_and_validate(asset)
-        if df is None: continue
+        if df is None or today_features is empty or today_features.empty: 
+            continue
         
         z_now = today_features['Z_Score'].iloc[-1]
         price_now = today_features['Close'].iloc[-1]
@@ -191,6 +203,11 @@ def main():
             c_box1, c_box2 = st.columns(2)
             with c_box1:
                 st.info(f"**Strategia d'Ingresso:**\n{state}\n\n**PAC Dinamico:** **{target_quota} €**")
+            with c_box2:
+                st.warning(f"**Strategia d'Uscita (Rebalancing):**\n{sell_instruction}")
+
+if __name__ == "__main__":
+    main()
             with c_box2:
                 st.warning(f"**Strategia d'Uscita (Rebalancing):**\n{sell_instruction}")
 
