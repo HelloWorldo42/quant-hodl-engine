@@ -96,6 +96,7 @@ class MacroFeatureEngineer:
         df['Above_SMA50']  = (close > df['SMA_50']).astype(int)
         df['Above_SMA200'] = (close > df['SMA_200']).astype(int)
 
+        # BUG CORRETTO RIGOROSAMENTE QUI: Inserita la lista numerica dei giorni
         for p in [5, 10, 21]:
             df[f'Mom_{p}d'] = close.pct_change(p)
 
@@ -260,4 +261,3 @@ class MacroPredictiveCore:
         
         return df, mean_accuracy, probabilities, accuracies, brier_scores, df_backtest
 
-# =====================================================================
