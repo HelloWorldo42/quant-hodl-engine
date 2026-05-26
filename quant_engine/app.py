@@ -28,7 +28,6 @@ def fetch_market_data(ticker):
             return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        # FIX: Forzatura tipo e precisione nanosecondo (ns)
         df.index = pd.to_datetime(df.index).tz_localize(None).astype('datetime64[ns]')
         return df
     except Exception:
@@ -43,7 +42,6 @@ def fetch_historical_sentiment():
         df_fng['timestamp'] = pd.to_datetime(df_fng['timestamp'], unit='s')
         df_fng['fng_value'] = df_fng['value'].astype(float)
         df_fng.set_index('timestamp', inplace=True)
-        # FIX: Forzatura tipo e precisione nanosecondo (ns) per match perfetto
         df_fng.index = pd.to_datetime(df_fng.index).tz_localize(None).astype('datetime64[ns]')
         return df_fng['fng_value'].sort_index()
     except Exception:
@@ -68,7 +66,6 @@ class MacroFeatureEngineer:
         df['RSI'] = 100 - (100 / (1 + (gain / loss)))
         df['ATR'] = (df['High'] - df['Low']).rolling(14).mean()
         
-        # Allineamento sicuro post-conversione dtypes
         if not series_fng.empty:
             df['FNG_Feature'] = series_fng.reindex(df.index, method='ffill').fillna(50)
         else:
@@ -187,7 +184,7 @@ def main():
         
     for asset in assets:
         df, acc, prob_up, today_features = MacroPredictiveCore.compile_and_validate(asset)
-        if df is None or today_features is empty or today_features.empty: 
+        if df is None or today_features is None or today_features.empty: 
             continue
         
         z_now = today_features['Z_Score'].iloc[-1]
@@ -203,11 +200,6 @@ def main():
             c_box1, c_box2 = st.columns(2)
             with c_box1:
                 st.info(f"**Strategia d'Ingresso:**\n{state}\n\n**PAC Dinamico:** **{target_quota} €**")
-            with c_box2:
-                st.warning(f"**Strategia d'Uscita (Rebalancing):**\n{sell_instruction}")
-
-if __name__ == "__main__":
-    main()
             with c_box2:
                 st.warning(f"**Strategia d'Uscita (Rebalancing):**\n{sell_instruction}")
 
