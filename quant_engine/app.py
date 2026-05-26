@@ -15,7 +15,7 @@ warnings.filterwarnings('ignore')
 # =====================================================================
 # 1. CONFIGURAZIONE INTERFACCIA
 # =====================================================================
-st.set_page_config(page_title="QUANT HODL v12.3 - ESSENTIAL ENGINE", layout="wide")
+st.set_page_config(page_title="QUANT HODL v12.4 - OPERATIONAL ENGINE", layout="wide")
 
 # =====================================================================
 # 2. SEZIONE API & DATA EXTRACTION (CON CACHING)
@@ -151,10 +151,9 @@ class MacroPredictiveCore:
         return df, np.mean(accuracies), prob_up, today_features
 
 # =====================================================================
-# 5. LOGICA SEMPLIFICATA (SOLO PAROLE ESSENZIALI)
+# 5. LOGICA OPERATIVA SEMPLIFICATA
 # =====================================================================
 def calculate_hodl_matrix(z_score, prob_up, base_quota):
-    # Condizioni basate sullo Z-Score (Distanza dalla media storica)
     if z_score > 2.3:
         mult = 0.0
         status = ":red[🛑 NON COMPRARE (Prezzo Troppo Alto)]"
@@ -172,7 +171,6 @@ def calculate_hodl_matrix(z_score, prob_up, base_quota):
         status = ":green[⚖️ COMPRA (Accumulo Standard)]"
         sell_action = "💎 **HODL**"
         
-    # Correzione dinamica basata sull'Intelligenza Artificiale (Probabilità a 5 giorni)
     if prob_up > 0.60 and mult > 0:
         mult *= 1.25
     elif prob_up < 0.40 and mult > 0:
@@ -184,8 +182,8 @@ def calculate_hodl_matrix(z_score, prob_up, base_quota):
 # 6. DASHBOARD PRINCIPALE
 # =====================================================================
 def main():
-    st.title("🎯 QUANT HODL ENGINE v12.3")
-    st.subheader("Interfaccia Semplificata e Segnali Diretti (Compra/Vendi)")
+    st.title("🎯 QUANT HODL ENGINE v12.4")
+    st.subheader("Pianificazione Operativa PAC Dinamico")
     st.divider()
     
     base_quota = st.sidebar.number_input("Quota PAC Base (€)", min_value=10, value=100, step=10)
@@ -195,8 +193,11 @@ def main():
     usd_eur_rate = fetch_usd_eur_rate()
     
     if not assets:
-        st.info("Inserisci almeno un ticker valido nella barra laterale (es: BTC-USD, TSLA).")
+        st.info("Inserisci almeno un ticker valido nella barra laterale.")
         return
+        
+    # Struttura dati per il riassunto finale
+    summary_data = []
         
     for asset in assets:
         df, acc, prob_up, today_features = MacroPredictiveCore.compile_and_validate(asset)
@@ -210,6 +211,9 @@ def main():
         
         target_quota, state, sell_instruction = calculate_hodl_matrix(z_now, prob_up, base_quota)
         
+        # Salva i dati per il totale finale
+        summary_data.append({"Asset": asset, "Quota da Comprare": target_quota, "Stato": state.split("]")[0].split("[")[-1] if "[" in state else state})
+        
         if "EUR" in asset:
             price_display = f"{price_now:,.2f} €"
         else:
@@ -220,7 +224,9 @@ def main():
             col1, col2, col3 = st.columns(3)
             col1.metric("Prezzo Attuale", price_display)
             col2.metric("Affidabilità Motore", f"{acc * 100:.1f}%")
-            col3.metric("Spinta IA (Breve Termine)", f"{prob_up * 100:.1f}%")
+            
+            # ESPLICITAZIONE DEI GIORNI: Risposta al tuo quesito
+            col3.metric("Spinta IA (Prossimi 5 Giorni)", f"{prob_up * 100:.1f}%", help="Probabilità di rialzo stimata per i prossimi 5 giorni di trading")
             
             c_box1, c_box2 = st.columns(2)
             with c_box1:
@@ -229,6 +235,23 @@ def main():
             with c_box2:
                 st.markdown("### **Se hai bisogno di ribilanciare:**")
                 st.info(f"{sell_instruction}")
+                
+    # =====================================================================
+    # SEZIONE AGGIUNTIVA: TABELLA COMPLESSIVA BUDGET
+    # =====================================================================
+    if summary_data:
+        st.divider()
+        st.markdown("## 📊 ORDINE DI ACQUISTO COMPLESSIVO")
+        
+        df_summary = pd.DataFrame(summary_data)
+        total_pac = df_summary["Quota da Comprare"].sum()
+        
+        col_table, col_total = st.columns([2, 1])
+        with col_table:
+            st.dataframe(df_summary, use_container_width=True, hide_index=True)
+        with col_total:
+            st.metric(label="💰 BUDGET TOTALE RICHIESTO", value=f"{total_pac:,.2f} €")
+            st.caption("Esegui gli ordini sul tuo broker usando queste quote esatte.")
 
 if __name__ == "__main__":
     main()
