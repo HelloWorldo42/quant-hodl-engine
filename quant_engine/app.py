@@ -32,43 +32,35 @@ threshold_slider = st.sidebar.slider("Soglia di Attivazione Probabilità", min_v
 
 def fetch_market_data_safe(ticker_str):
     try:
-        # Scarichiamo i dati base
-        df = yf.download(ticker_str, period="5y", progress=False)
+        # BUG FIX 2026: Usiamo l'oggetto Ticker nativo invece di yf.download per evitare del tutto il MultiIndex
+        asset = yf.Ticker(ticker_str)
+        df = asset.history(period="5y", progress=False)
+        
         if df.empty:
             return None
             
-        # FIX FINALE PER LE NUOVE VERSIONI DI YFINANCE (2025/2026)
-        # Se le colonne sono un MultiIndex, estraiamo solo il primo livello (Open, High, Close, ecc.)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-            
-        # Forziamo i nomi delle colonne in stringhe pulite con iniziale maiuscola
+        # Resettiamo e puliamo i nomi delle colonne convertendoli in stringhe piatte
         df.columns = [str(c).strip().capitalize() for c in df.columns]
         
-        # Rimappatura di sicurezza delle colonne
-        rename_dict = {'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume', 'Adj close': 'Close'}
+        # Rimappatura standard delle colonne fondamentali
+        rename_dict = {'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume'}
         df = df.rename(columns=rename_dict)
         
-        # Rimuoviamo colonne duplicate o non necessarie nate dall'appiattimento
-        df = df.loc[:, ~df.columns.duplicated()]
-        
+        # Selezioniamo solo le colonne necessarie convertendole in float
         required = ['Open', 'High', 'Low', 'Close', 'Volume']
         if not all(col in df.columns for col in required):
-            st.error(f"Colonne mancanti nel dataset scaricato. Trovate solo: {list(df.columns)}")
             return None
             
         df_cleaned = df[required].astype(float)
         df_cleaned.index = pd.to_datetime(df_cleaned.index).tz_localize(None).astype('datetime64[ns]')
         return df_cleaned
     except Exception as e:
-        st.error(f"Errore critico durante il download da Yahoo Finance: {str(e)}")
+        st.sidebar.error(f"Errore download: {str(e)}")
         return None
 
 def fetch_usd_eur_rate_safe():
     try:
-        df = yf.download("USDEUR=X", period="5d", progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+        df = yf.Ticker("USDEUR=X").history(period="5d", progress=False)
         return float(df['Close'].iloc[-1])
     except Exception:
         return 0.92
@@ -86,7 +78,7 @@ def fetch_historical_sentiment_safe():
     except Exception:
         return pd.Series(dtype=float)
 
-# Esecuzione della Pipeline con feedback immediato a schermo
+# Esecuzione della Pipeline con feedback controllato
 if ticker:
     df_raw = fetch_market_data_safe(ticker)
     eur_usd_rate = fetch_usd_eur_rate_safe()
@@ -95,7 +87,7 @@ if ticker:
     st.sidebar.markdown(f"**Cambio USD/EUR Corrente:** {eur_usd_rate:.4f}")
 
     if df_raw is None or len(df_raw) < 300:
-        st.error("❌ Storico dati insufficiente o errore strutturale nei dati scaricati. Verifica il Ticker inserito.")
+        st.error("❌ Errore strutturale o storico dati insufficiente da Yahoo Finance. Verifica che il Ticker sia corretto (es. BTC-USD).")
     else:
         # --- FEATURE ENGINEERING ---
         df = df_raw.copy()
@@ -111,8 +103,8 @@ if ticker:
         df['Above_SMA50']  = (close > df['SMA_50']).astype(int)
         df['Above_SMA200'] = (close > df['SMA_200']).astype(int)
 
-        # Correzione definitiva della sintassi dei cicli del momentum
-        for p in [5, 10, 21]:
+        # Ciclo del momentum numerico pulito
+        for p in:
             df[f'Mom_{p}d'] = close.pct_change(p)
 
         delta = close.diff()
@@ -215,3 +207,13 @@ if ticker:
             st.metric(label=f"Ultimo Prezzo ({ticker})", value=f"\${last_close_usd:,.2f}")
         with col2:
             st.metric(label="Accuratezza Modello Media", value=f"{mean_acc * 100:.1f}%")
+        with col3:
+            st.metric(label="Fear & Greed Index", value=int(df['FNG'].iloc[-1]))
+        with col4:
+            st.metric(label="Data Sessione Live", value=last_date)
+
+        st.markdown("---")
+        st.write("### 🔮 Tabellone Predittivo Direzionale (Probabilità di Rialzo Calibrate)")
+        p_col1, p_col2, p_col3 = st.columns(3)
+        with p_col1:
+            st.progress(probabilities['Target_1d'])
