@@ -15,7 +15,7 @@ warnings.filterwarnings('ignore')
 # =====================================================================
 # 1. CONFIGURAZIONE INTERFACCIA
 # =====================================================================
-st.set_page_config(page_title="QUANT HODL v12.4 - OPERATIONAL ENGINE", layout="wide")
+st.set_page_config(page_title="QUANT HODL v12.5 - MULTI-TIMEFRAME ENGINE", layout="wide")
 
 # =====================================================================
 # 2. SEZIONE API & DATA EXTRACTION (CON CACHING)
@@ -58,7 +58,7 @@ def fetch_historical_sentiment():
         return pd.Series(dtype=float)
 
 # =====================================================================
-# 3. ADVANCED FEATURE ENGINEERING (TECNICO + MACRO + SENTIMENT)
+# 3. ADVANCED MULTI-TARGET FEATURE ENGINEERING
 # =====================================================================
 class MacroFeatureEngineer:
     @staticmethod
@@ -82,78 +82,76 @@ class MacroFeatureEngineer:
             df['FNG_Feature'] = 50
             
         df['Macro_Volume_Momentum'] = df['Volume'].pct_change(20).fillna(0)
-        
         df = df.dropna()
-        df['Target'] = (df['Close'].shift(-5) > df['Close'] * 1.025).astype(int)
+        
+        # Tre Target distinti: 1 giorno, 3 giorni, 5 giorni
+        df['Target_1d'] = (df['Close'].shift(-1) > df['Close'] * 1.005).astype(int)
+        df['Target_3d'] = (df['Close'].shift(-3) > df['Close'] * 1.015).astype(int)
+        df['Target_5d'] = (df['Close'].shift(-5) > df['Close'] * 1.025).astype(int)
         
         return df
 
 # =====================================================================
-# 4. ENGINE DI TRAINING E CONVALIDA WALK-FORWARD
+# 4. MULTI-TIMEFRAME PREDICTIVE CORE
 # =====================================================================
 class MacroPredictiveCore:
     @staticmethod
     @st.cache_resource
-    def compile_and_validate(ticker):
+    def compile_and_validate_multi(ticker):
         raw_price = fetch_market_data(ticker)
         series_fng = fetch_historical_sentiment()
         
         if raw_price is None or len(raw_price) < 250:
-            return None, 0.0, 0.0, None
+            return None, 0.0, {}, None
             
         df = MacroFeatureEngineer.construct_matrix(raw_price, series_fng)
         if df.empty:
-            return None, 0.0, 0.0, None
+            return None, 0.0, {}, None
             
-        train_df = df.iloc[:-5] 
-        today_features = df.iloc[[-1]] 
-        
         feature_cols = ['Z_Score', 'RSI', 'ATR', 'FNG_Feature', 'Macro_Volume_Momentum']
-        X = train_df[feature_cols]
-        y = train_df['Target']
+        today_features = df.iloc[[-1]]
         
-        n_splits = 5
-        split_size = len(X) // (n_splits + 1)
+        # Validazione e predizione per i 3 orizzonti temporali
+        probabilities = {}
         accuracies = []
         
-        for i in range(n_splits):
-            train_end = (i + 1) * split_size
-            test_end = train_end + min(split_size, len(X) - train_end)
-            if test_end > len(X): break
-                
-            X_tr, y_tr = X.iloc[:train_end], y.iloc[:train_end]
-            X_te, y_te = X.iloc[train_end:test_end], y.iloc[train_end:test_end]
+        for horizon, target_col in [("1d", "Target_1d"), ("3d", "Target_3d"), ("5d", "Target_5d")]:
+            train_df = df.iloc[:-5] # Evita data leakage
+            X = train_df[feature_cols]
+            y = train_df[target_col]
+            
+            # Singolo split walk-forward veloce per stabilità
+            split_idx = int(len(X) * 0.8)
+            X_tr, y_tr = X.iloc[:split_idx], y.iloc[:split_idx]
+            X_te, y_te = X.iloc[split_idx:], y.iloc[split_idx:]
             
             scaler = StandardScaler()
             X_tr_s = scaler.fit_transform(X_tr)
             X_te_s = scaler.transform(X_te)
             
-            xgb_m = xgb.XGBClassifier(n_estimators=50, max_depth=3, learning_rate=0.05, verbosity=0, random_state=42)
-            lgb_m = lgb.LGBMClassifier(n_estimators=50, max_depth=3, learning_rate=0.05, verbose=-1, random_state=42)
-            rf_m = RandomForestClassifier(n_estimators=50, max_depth=4, random_state=42, n_jobs=-1)
+            xgb_m = xgb.XGBClassifier(n_estimators=40, max_depth=3, learning_rate=0.05, verbosity=0, random_state=42)
+            rf_m = RandomForestClassifier(n_estimators=40, max_depth=4, random_state=42, n_jobs=-1)
             
-            ensemble = VotingClassifier(estimators=[('xgb', xgb_m), ('lgb', lgb_m), ('rf', rf_m)], voting='soft')
+            ensemble = VotingClassifier(estimators=[('xgb', xgb_m), ('rf', rf_m)], voting='soft')
             ensemble.fit(X_tr_s, y_tr)
             accuracies.append(accuracy_score(y_te, ensemble.predict(X_te_s)))
             
-        final_scaler = StandardScaler()
-        X_scaled = final_scaler.fit_transform(X)
-        final_ensemble = VotingClassifier(estimators=[
-            ('xgb', xgb.XGBClassifier(n_estimators=60, max_depth=3, verbosity=0, random_state=42)),
-            ('lgb', lgb.LGBMClassifier(n_estimators=60, max_depth=3, verbose=-1, random_state=42)),
-            ('rf', RandomForestClassifier(n_estimators=60, max_depth=4, random_state=42, n_jobs=-1))
-        ], voting='soft')
-        final_ensemble.fit(X_scaled, y)
-        
-        latest_vector = final_scaler.transform(today_features[feature_cols])
-        prob_up = final_ensemble.predict_proba(latest_vector)[0][1]
-        
-        return df, np.mean(accuracies), prob_up, today_features
+            # Predizione finale
+            final_scaler = StandardScaler()
+            X_scaled = final_scaler.fit_transform(X)
+            final_ensemble = VotingClassifier(estimators=[('xgb', xgb_m), ('rf', rf_m)], voting='soft')
+            final_ensemble.fit(X_scaled, y)
+            
+            latest_vector = final_scaler.transform(today_features[feature_cols])
+            probabilities[horizon] = final_ensemble.predict_proba(latest_vector)[0][1]
+            
+        return df, np.mean(accuracies), probabilities, today_features
 
 # =====================================================================
-# 5. LOGICA OPERATIVA SEMPLIFICATA
+# 5. LOGICA OPERATIVA COMBINATA CON IA MULTI-TEMPORALE
 # =====================================================================
-def calculate_hodl_matrix(z_score, prob_up, base_quota):
+def calculate_hodl_matrix(z_score, probs, base_quota):
+    # Base deterministica dallo Z-Score
     if z_score > 2.3:
         mult = 0.0
         status = ":red[🛑 NON COMPRARE (Prezzo Troppo Alto)]"
@@ -171,19 +169,30 @@ def calculate_hodl_matrix(z_score, prob_up, base_quota):
         status = ":green[⚖️ COMPRA (Accumulo Standard)]"
         sell_action = "💎 **HODL**"
         
-    if prob_up > 0.60 and mult > 0:
+    # Calcolo della spinta aggregata (Media pesata o trend)
+    avg_prob = np.mean([probs['1d'], probs['3d'], probs['5d']])
+    
+    if avg_prob > 0.58 and mult > 0:
         mult *= 1.25
-    elif prob_up < 0.40 and mult > 0:
+    elif avg_prob < 0.42 and mult > 0:
         mult *= 0.5
         
-    return round(base_quota * mult, 2), status, sell_action
+    # Definizione del testo del Trend visivo
+    if probs['1d'] > 0.52 and probs['5d'] > 0.52:
+        trend_label = "🟢 RIALZO COMPATTO"
+    elif probs['1d'] < 0.45 and probs['5d'] < 0.45:
+        trend_label = "🔴 RIBASSO COMPATTO"
+    else:
+        trend_label = "🟡 LATERALE / INCERTO"
+        
+    return round(base_quota * mult, 2), status, sell_action, trend_label
 
 # =====================================================================
 # 6. DASHBOARD PRINCIPALE
 # =====================================================================
 def main():
-    st.title("🎯 QUANT HODL ENGINE v12.4")
-    st.subheader("Pianificazione Operativa PAC Dinamico")
+    st.title("🎯 QUANT HODL ENGINE v12.5")
+    st.subheader("Analisi Quantitativa Integrata su Orizzonti Organizzati (1d, 3d, 5d)")
     st.divider()
     
     base_quota = st.sidebar.number_input("Quota PAC Base (€)", min_value=10, value=100, step=10)
@@ -196,11 +205,10 @@ def main():
         st.info("Inserisci almeno un ticker valido nella barra laterale.")
         return
         
-    # Struttura dati per il riassunto finale
     summary_data = []
         
     for asset in assets:
-        df, acc, prob_up, today_features = MacroPredictiveCore.compile_and_validate(asset)
+        df, acc, probs, today_features = MacroPredictiveCore.compile_and_validate_multi(asset)
         
         if df is None or today_features is None or today_features.empty: 
             st.sidebar.error(f"❌ Impossibile caricare '{asset}'.")
@@ -209,9 +217,8 @@ def main():
         z_now = today_features['Z_Score'].iloc[-1]
         price_now = today_features['Close'].iloc[-1]
         
-        target_quota, state, sell_instruction = calculate_hodl_matrix(z_now, prob_up, base_quota)
+        target_quota, state, sell_instruction, trend_label = calculate_hodl_matrix(z_now, probs, base_quota)
         
-        # Salva i dati per il totale finale
         summary_data.append({"Asset": asset, "Quota da Comprare": target_quota, "Stato": state.split("]")[0].split("[")[-1] if "[" in state else state})
         
         if "EUR" in asset:
@@ -220,13 +227,14 @@ def main():
             price_eur = price_now * usd_eur_rate
             price_display = f"${price_now:,.2f} ({price_eur:,.2f} €)"
         
+        # Stringa di aiuto per il popup del mouse
+        help_string = f"Dettaglio Probabilità:\n• 1 Giorno: {probs['1d']*100:.1f}%\n• 3 Giorni: {probs['3d']*100:.1f}%\n• 5 Giorni: {probs['5d']*100:.1f}%"
+        
         with st.expander(f"🔮 SEGNO CORRENTE: {asset}", expanded=True):
             col1, col2, col3 = st.columns(3)
             col1.metric("Prezzo Attuale", price_display)
-            col2.metric("Affidabilità Motore", f"{acc * 100:.1f}%")
-            
-            # ESPLICITAZIONE DEI GIORNI: Risposta al tuo quesito
-            col3.metric("Spinta IA (Prossimi 5 Giorni)", f"{prob_up * 100:.1f}%", help="Probabilità di rialzo stimata per i prossimi 5 giorni di trading")
+            col2.metric("Affidabilità Motore (Media)", f"{acc * 100:.1f}%")
+            col3.metric("Trend IA Multi-Timeframe", trend_label, help=help_string)
             
             c_box1, c_box2 = st.columns(2)
             with c_box1:
@@ -236,9 +244,6 @@ def main():
                 st.markdown("### **Se hai bisogno di ribilanciare:**")
                 st.info(f"{sell_instruction}")
                 
-    # =====================================================================
-    # SEZIONE AGGIUNTIVA: TABELLA COMPLESSIVA BUDGET
-    # =====================================================================
     if summary_data:
         st.divider()
         st.markdown("## 📊 ORDINE DI ACQUISTO COMPLESSIVO")
